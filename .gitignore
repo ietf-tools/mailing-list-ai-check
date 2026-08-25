@@ -59,6 +59,7 @@ graphify-out/
 *.log
 *.sqlite3
 data/
+tmp/
 
 # ---- Spike scratch code (findings go in docs/findings/) ----
 spikes/

@@ -11,6 +11,10 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    // Bind every interface, not Vite's default `localhost`. In a container
+    // `localhost` resolves to ::1 alone, and a devcontainer port forward dials
+    // 127.0.0.1, so the forwarded port refuses every connection.
+    host: '0.0.0.0',
     // Honor an assigned PORT (e.g. from the dev-tool launcher) so multiple
     // dev servers can coexist; fall back to the usual 5173.
     port: Number(process.env.PORT) || 5173,

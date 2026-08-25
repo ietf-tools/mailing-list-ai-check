@@ -25,6 +25,12 @@ dev = [
     "ruff>=0.6",
     "pre-commit>=3.7",
 ]
+# Serving the dashboard outside development. `mail-ai-web` is Flask's
+# single-process dev server; the container image runs gunicorn instead (see
+# docker/mlac-web and docs/deployment.md).
+prod = [
+    "gunicorn>=23.0",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

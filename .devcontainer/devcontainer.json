@@ -1,0 +1,62 @@
+// Dev container for mailing-list-ai-check. See https://containers.dev/.
+//
+// The image is the `dev` target of the repo's Dockerfile, which is also where
+// the production image comes from — one definition, so the interpreter, Node and
+// the dependency set cannot drift between them.
+//
+// The code tree is bind-mounted from the host, so edits on the host are what
+// runs in the container, and the database (DATABASE_PATH, ./data/mail.db by
+// default) is a file inside that mount — it stays on the developer's disk with
+// the code and survives a container rebuild.
+{
+	"name": "mailing-list-ai-check",
+	"build": {
+		"context": "..",
+		"dockerfile": "../Dockerfile",
+		"target": "dev"
+	},
+	"remoteUser": "vscode",
+	"workspaceFolder": "/workspaces/mailing-list-ai-check",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/mailing-list-ai-check,type=bind,consistency=cached",
+
+	// frontend/node_modules is a named volume rather than part of the bind
+	// mount: the tree holds platform-specific binaries (esbuild, rollup), so a
+	// host install must not be visible to the container, nor the container's to
+	// the host. It also makes npm install and Vite noticeably faster on macOS
+	// and Windows hosts, where bind-mount I/O is slow.
+	"mounts": [
+		"source=mlac-frontend-node-modules,target=/workspaces/mailing-list-ai-check/frontend/node_modules,type=volume"
+	],
+
+	"containerEnv": {
+		// The Makefile runs the Python tools from ./.venv when one is present and
+		// from PATH otherwise. Empty pins it to PATH (/opt/venv in the image), so
+		// a .venv the developer built on the host is ignored here.
+		"VENV_BIN": ""
+	},
+
+	"postCreateCommand": ".devcontainer/post-create.sh",
+
+	// 8050 is the Flask API (mail-ai-web), 5173 the Vite dev server; open 5173,
+	// which proxies /api to 8050.
+	"forwardPorts": [8050, 5173],
+	"portsAttributes": {
+		"8050": { "label": "Flask API (mail-ai-web)" },
+		"5173": { "label": "Vite dev server (dashboard)" }
+	},
+
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"python.defaultInterpreterPath": "/opt/venv/bin/python",
+				"python.testing.pytestEnabled": true,
+				"files.exclude": { "**/__pycache__": true }
+			},
+			"extensions": [
+				"ms-python.python",
+				"charliermarsh.ruff",
+				"Vue.volar"
+			]
+		}
+	}
+}

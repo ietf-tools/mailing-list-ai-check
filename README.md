@@ -28,6 +28,9 @@ senders panes below, and a message drawer over them.
   concern with no third-party dependency.
 - Node.js (only to build the dashboard front end)
 
+Both are supplied by the repo's container image, which is an alternative to
+installing them: see "Containers" below.
+
 ## Install
 
 ```bash
@@ -39,6 +42,28 @@ pip install -e ".[dev]"
 make install-frontend   # npm install
 make build              # npm run build -> frontend/dist
 ```
+
+### Containers
+
+One `Dockerfile` defines both environments the app runs in, as two build
+targets, so the interpreter and the dependency set cannot drift between them.
+
+- `dev` — the image `.devcontainer/devcontainer.json` builds. It carries the
+  toolchain and the dependencies but no source: the code tree is bind-mounted
+  from the developer's disk and installed in editable mode, and the database is a
+  file inside that same mount. Opening the repo in a devcontainer-aware editor
+  builds it and runs `.devcontainer/post-create.sh`; `make image-dev` builds it
+  by hand.
+- `prod` — a self-contained deployment image, built by `make image`: the source
+  tree, the built dashboard and the documentation set at `/app`, gunicorn serving
+  the Flask app as an unprivileged user, and the SQLite file on a separate
+  persistent mount at `/data`. The pipeline commands are on `PATH` in the same
+  image, so pull, extract, score and import run as batch jobs against it.
+
+[docs/deployment.md](docs/deployment.md) documents both targets, every
+environment variable the image reads, and a Kubernetes deployment — including
+the reason a deployment runs exactly one replica (the store is one SQLite file)
+and how an export file is loaded into a running instance.
 
 ## Configuration
 
@@ -461,10 +486,17 @@ same parameters as `GET /api/export`.
 ## Development
 
 ```bash
-make test     # pytest
-make lint     # ruff check
-make dev      # prints the two-terminal (Vite + Flask) dev workflow
+make test        # pytest
+make lint        # ruff check
+make dev         # prints the two-terminal (Vite + Flask) dev workflow
+make image       # build the deployment image (see docs/deployment.md)
+make image-dev   # build the dev-container image
 ```
+
+`make test` and `make lint` run the Python tools from `./.venv` when the tree has
+one and from `PATH` otherwise, so the same targets work in a virtualenv on the
+host and in the dev container, where the virtualenv is at `/opt/venv`. Set
+`VENV_BIN` to force either (`make test VENV_BIN=.venv/bin/`).
 
 Layout:
 

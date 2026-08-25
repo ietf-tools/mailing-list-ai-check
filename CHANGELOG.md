@@ -37,6 +37,26 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.15.4] - unreleased
+
+Summary: Container images for development and deployment, from one Dockerfile with a dev target and a Kubernetes-ready production target.
+
+- Add a `Dockerfile` with two build targets: `dev`, the dev-container image, and `prod`, a self-contained deployment image.
+- Build the dashboard in the image's frontend stage, so `frontend/dist` ships inside the production image and cannot lag the API.
+- Add `docker/mlac-web`, the production web entry point: gunicorn serving `webapp:create_app()`, with every server setting read from an environment variable.
+- Add a `prod` optional-dependency group holding gunicorn; `mail-ai-web` remains the development server.
+- Install the package in editable mode in both image targets, because the app locates `frontend/dist` and the documentation set relative to the package's own file.
+- Default the production image to `DATABASE_PATH=/data/mail.db`, a fixed non-root uid/gid of 1001 and a root-owned `/app`, so the container writes only to its data mount and a temporary directory.
+- Add a `HEALTHCHECK` on `GET /api/capabilities`, the one GET that never opens the database.
+- Build the dev container from the repo's Dockerfile instead of the base image plus the Python feature, and drop the now-unused feature lock file.
+- Add `.devcontainer/post-create.sh`: an editable install of the bind-mounted tree and the frontend dependency install.
+- Bind the Vite dev server to every interface, because `localhost` resolves to `::1` alone in the dev container and a forwarded port dials 127.0.0.1.
+- Mount `frontend/node_modules` as a named volume in the dev container, keeping the host's platform-specific install out of the container.
+- Resolve the Makefile's Python tool paths through `VENV_BIN`: `./.venv` when the tree has one, `PATH` otherwise, which is what the dev container uses.
+- Add `make image` and `make image-dev`, tagging the deployment image with the package version.
+- Add `.dockerignore`, keeping credentials, local databases and export files out of the build context.
+- Add `docs/deployment.md`: both image targets, the environment variables the image reads, and a Kubernetes deployment with the pipeline stages as jobs.
+
 ## [1.15.3] - 2026-08-21
 
 Summary: Replace the messages pane's preloaded From dropdown with a server-side type-ahead search.

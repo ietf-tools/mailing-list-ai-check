@@ -1,0 +1,60 @@
+#!/bin/sh
+# Serve the dashboard with gunicorn — the web entry point of the production
+# image.
+#
+# `mail-ai-web` is Flask's single-process development server and stays what it
+# is; this script is what a container runs instead. create_app is used as a
+# gunicorn application factory, so no new module is needed.
+#
+# Every setting is an environment variable with a default, so a Kubernetes
+# Deployment tunes the server without a new image:
+#
+#   FLASK_HOST / FLASK_PORT      bind address (default 0.0.0.0:8050)
+#   WEB_WORKERS                  worker processes (default 2)
+#   WEB_THREADS                  threads per worker (default 4)
+#   WEB_TIMEOUT                  seconds a request may run (default 1800)
+#   WEB_GRACEFUL_TIMEOUT         seconds to finish in-flight requests on SIGTERM
+#                                (default 30)
+#   WEB_ACCESS_LOG               access-log destination; "-" is stdout, empty
+#                                disables it (default "-")
+#   WEB_FORWARDED_ALLOW_IPS      proxies whose X-Forwarded-* headers are trusted
+#                                (default "*")
+#
+# The timeout is deliberately long: /api/pull, /api/extract, /api/score and
+# /api/import each run for minutes on a real corpus, and gunicorn's 30-second
+# default would kill the worker part-way through. Message bodies are never
+# logged; the access log records request lines only.
+#
+# WEB_FORWARDED_ALLOW_IPS defaults to trusting any proxy because the app makes no
+# decision from the client address — it has no authentication and no
+# address-based rules — and in a cluster the ingress is never on localhost.
+set -eu
+
+host="${FLASK_HOST:-0.0.0.0}"
+port="${FLASK_PORT:-8050}"
+
+set -- gunicorn \
+    --bind "${host}:${port}" \
+    --workers "${WEB_WORKERS:-2}" \
+    --threads "${WEB_THREADS:-4}" \
+    --timeout "${WEB_TIMEOUT:-1800}" \
+    --graceful-timeout "${WEB_GRACEFUL_TIMEOUT:-30}" \
+    --forwarded-allow-ips "${WEB_FORWARDED_ALLOW_IPS:-*}"
+
+# Gunicorn writes a heartbeat file per worker into this directory. On a container
+# filesystem backed by a disk that can stall, that write is what makes the
+# arbiter kill a healthy worker; /dev/shm is memory-backed and always present
+# under Kubernetes.
+if [ -w /dev/shm ]; then
+    set -- "$@" --worker-tmp-dir /dev/shm
+fi
+
+accesslog="${WEB_ACCESS_LOG:--}"
+if [ -n "${accesslog}" ]; then
+    set -- "$@" --access-logfile "${accesslog}"
+fi
+
+# exec so gunicorn is PID 1 and receives SIGTERM directly: it stops accepting,
+# finishes in-flight requests within the graceful timeout, and exits. That
+# matters here because a request may hold the SQLite write lock.
+exec "$@" "mailing_list_ai_check.webapp:create_app()"

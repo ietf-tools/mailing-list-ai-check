@@ -1,0 +1,74 @@
+# Build context exclusions. The context is sent to the daemon in full, so this
+# file is also what keeps a local corpus or export out of the image: the repo
+# root is where an export lands by default, and one is routinely hundreds of
+# megabytes.
+
+# ---- secrets (never in an image) ----
+.env
+.env.*
+!.env.example
+secrets/
+.secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+client_secret*.json
+token.json
+
+# ---- local data and exports ----
+data/
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+*.jsonl.zst
+*.jsonl.gz
+*.tar.gz
+*.log
+
+# ---- version control and CI ----
+.git/
+.github/
+.gitignore
+.pre-commit-config.yaml
+
+# ---- Python build and cache artifacts ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# ---- frontend: installed and built by the image, never copied in ----
+frontend/node_modules/
+frontend/dist/
+
+# ---- editor, tooling and local indexes ----
+.vscode/
+.idea/
+.DS_Store
+*.swp
+.claude/
+.codegraph/
+graphify-out/
+spikes/
+
+# ---- not needed at runtime ----
+tests/
+.devcontainer/
+docs/design/
