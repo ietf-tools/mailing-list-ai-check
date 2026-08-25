@@ -56,6 +56,8 @@ Summary: Container images for development and deployment, from one Dockerfile wi
 - Add `make image` and `make image-dev`, tagging the deployment image with the package version.
 - Add `.dockerignore`, keeping credentials, local databases and export files out of the build context.
 - Add `docs/deployment.md`: both image targets, the environment variables the image reads, and a Kubernetes deployment with the pipeline stages as jobs.
+- Add `k8s/`: the applyable manifests for a production cluster — namespace, `ReadWriteOnce` claim, config map, single-replica `Recreate` deployment and `ClusterIP` service — with a kustomization that applies the set.
+- Add `k8s/README.md`: the prerequisites, the apply commands, and the single-writer, read-only-root and probe constraints the manifests encode.
 
 ## [1.15.3] - 2026-08-21
 

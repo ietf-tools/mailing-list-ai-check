@@ -1,0 +1,12 @@
+# Applies the whole set in dependency order: kubectl apply -k k8s/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mlac
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+# The mlac-credentials Secret is deliberately absent: it is created out of band
+# (see README.md) so that no credential is ever written into this repository.

@@ -188,6 +188,11 @@ from several. So the Deployment runs **one** replica, with
 volume, on a `ReadWriteOnce` claim. Scaling out is not a configuration change;
 it would require a different store.
 
+The manifests are in [`k8s/`](../k8s/), one file per object, and are applied
+with `kubectl apply -k k8s/`; `k8s/README.md` lists them and the prerequisites.
+That directory is the source of truth — the YAML below is the same set, written
+in condensed form for reading here.
+
 Create the namespace and, if the instance pulls or scores, the credentials:
 
 ```bash

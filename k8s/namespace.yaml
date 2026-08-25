@@ -1,0 +1,7 @@
+# The namespace every other manifest in this directory targets.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlac
+  labels:
+    app.kubernetes.io/name: mailing-list-ai-check

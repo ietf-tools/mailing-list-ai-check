@@ -1,0 +1,122 @@
+# The dashboard and API: gunicorn serving webapp:create_app() from the prod
+# image, with the SQLite database on the mlac-data claim.
+#
+# One replica, and strategy Recreate rather than RollingUpdate: the store is a
+# single SQLite file on a ReadWriteOnce claim, so two pods must never hold it at
+# once, not even for the overlap of a rollout. Scaling out is not a
+# configuration change; it would require a different store.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlac-web
+  namespace: mlac
+  labels:
+    app: mlac-web
+    app.kubernetes.io/name: mailing-list-ai-check
+    app.kubernetes.io/component: web
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: mlac-web
+  template:
+    metadata:
+      labels:
+        app: mlac-web
+        app.kubernetes.io/name: mailing-list-ai-check
+        app.kubernetes.io/component: web
+        app.kubernetes.io/version: "1.15.3"
+    spec:
+      # The application never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        # The uid/gid the prod image creates; /data is created owned by it.
+        runAsUser: 1001
+        runAsGroup: 1001
+        runAsNonRoot: true
+        # Makes the mounted volume writable by that user.
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      # Long enough for the graceful shutdown in docker/mlac-web to finish an
+      # in-flight request that holds the SQLite write lock.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: web
+          # The tag tracks the package version, which `make image` reads from
+          # src/mailing_list_ai_check/__init__.py. Prefix it with the registry
+          # the cluster pulls from.
+          image: mailing-list-ai-check:1.15.3
+          imagePullPolicy: IfNotPresent
+          # CMD is mlac-web; the pipeline commands are on PATH in the same image
+          # and are run as Jobs (docs/deployment.md).
+          ports:
+            - name: http
+              containerPort: 8050
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: mlac-config
+            # IMAP and Pangram credentials. Optional, because an instance that
+            # neither pulls nor scores needs none: the dashboard and the
+            # extraction stage read only the database.
+            - secretRef:
+                name: mlac-credentials
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            # The application writes only to /data and to a temporary
+            # directory, and PYTHONDONTWRITEBYTECODE=1 keeps it from writing
+            # __pycache__ into /app.
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # /api/capabilities reads the app config and never opens the
+          # database, so no probe can be blocked by a long-running write holding
+          # the SQLite lock.
+          startupProbe:
+            httpGet:
+              path: /api/capabilities
+              port: http
+            periodSeconds: 5
+            # 120s, which is the store's PRAGMA busy_timeout: enough for the
+            # first open after an upgrade to apply migrations and any backfill.
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /api/capabilities
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/capabilities
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # No CPU limit: extraction and scoring runs are throughput-bound
+              # and are better throttled by the worker count than by quota.
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mlac-data
+        - name: tmp
+          # GET /api/export builds the export into a temporary file before
+          # streaming it, and POST /api/import spools the upload the same way,
+          # so this holds about one export's worth of data.
+          emptyDir:
+            sizeLimit: 8Gi
