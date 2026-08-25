@@ -1,0 +1,25 @@
+# Cluster-internal address for the dashboard and API. Expose it through
+# whatever ingress the cluster uses.
+#
+# The application has no authentication of its own: an instance reachable beyond
+# the cluster should run with PUBLIC_READONLY=1 (as k8s/configmap.yaml sets),
+# and the ingress should supply access control if the message text is not meant
+# to be public.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlac-web
+  namespace: mlac
+  labels:
+    app: mlac-web
+    app.kubernetes.io/name: mailing-list-ai-check
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    app: mlac-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

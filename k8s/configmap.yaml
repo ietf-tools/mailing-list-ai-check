@@ -1,0 +1,30 @@
+# Non-secret configuration. Every key here is an environment variable the image
+# already reads, so changing one is a restart rather than a rebuild; the full
+# list is in docs/deployment.md. Credentials do not belong in this file — see
+# k8s/README.md for the Secret the Deployment reads alongside it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlac-config
+  namespace: mlac
+  labels:
+    app.kubernetes.io/name: mailing-list-ai-check
+data:
+  # Read by Config.load (the application).
+  DATABASE_PATH: /data/mail.db
+  LOG_LEVEL: INFO
+  # A publicly reachable instance: reads work, every state-changing request is
+  # refused with 403, and the full corpus download (message bodies included) is
+  # off while the scores/metadata CSV archive stays available.
+  PUBLIC_READONLY: "1"
+  ALLOW_EXPORT: "0"
+  ALLOW_STATS_EXPORT: "1"
+  # Read by docker/mlac-web (gunicorn).
+  WEB_WORKERS: "2"
+  WEB_THREADS: "4"
+  # 1800 is the image default, sized for /api/pull, /api/extract, /api/score and
+  # /api/import, which run for minutes on a real corpus. An instance that runs
+  # those stages as Jobs and only serves the dashboard can set it far lower.
+  WEB_TIMEOUT: "1800"
+  WEB_GRACEFUL_TIMEOUT: "30"
+  WEB_ACCESS_LOG: "-"

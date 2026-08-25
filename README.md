@@ -63,7 +63,8 @@ targets, so the interpreter and the dependency set cannot drift between them.
 [docs/deployment.md](docs/deployment.md) documents both targets, every
 environment variable the image reads, and a Kubernetes deployment — including
 the reason a deployment runs exactly one replica (the store is one SQLite file)
-and how an export file is loaded into a running instance.
+and how an export file is loaded into a running instance. The manifests
+themselves are in [k8s/](k8s/), applied with `kubectl apply -k k8s/`.
 
 ## Configuration
 

@@ -1,0 +1,25 @@
+# The only persistent state: the SQLite database at /data/mail.db.
+#
+# ReadWriteOnce, because SQLite in WAL mode supports concurrent access from one
+# machine and not from several. The Deployment therefore runs one replica and a
+# pipeline Job can share the claim only when it lands on the same node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlac-data
+  namespace: mlac
+  labels:
+    app.kubernetes.io/name: mailing-list-ai-check
+    app.kubernetes.io/component: data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # The database plus room for an import: an import is one transaction, and
+      # its WAL grows to roughly the size of the resulting database, so about
+      # 2.5x the final size is needed to import into it. Sized for a corpus of
+      # a few hundred thousand messages; see docs/export-import.md.
+      storage: 50Gi
+  # storageClassName: ""   # set to the cluster's block-storage class if the
+  #                        # default class is not ReadWriteOnce-capable.
