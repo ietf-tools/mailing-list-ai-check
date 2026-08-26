@@ -28,6 +28,24 @@ make image-dev    # docker build --target dev  -t mailing-list-ai-check:dev .
 needs network access: it installs the Python dependencies from PyPI and the
 frontend dependencies from the npm registry.
 
+`.github/workflows/build.yml` builds the same `prod` target on every push to
+`main` and every `v*` tag, and publishes it to
+`ghcr.io/<owner>/mailing-list-ai-check` — `ghcr.io/ietf-tools/mailing-list-ai-check`
+for this repository, and a fork's own path for a fork. Three tags are pushed:
+the package version, `latest` (default branch only), and `sha-<commit>`. The
+first two are overwritten by a later build at the same version, so `sha-<commit>`
+is the immutable reference to pin when the deployed commit must be unambiguous.
+A pull request builds and smoke-tests the image but publishes nothing.
+
+The workflow loads the built image into the runner's Docker daemon, runs it with
+the same hardening the Deployment applies (unprivileged user, read-only root
+filesystem, a writable `/tmp`, the database on a separate volume) and checks
+that `/api/capabilities` reports the configuration it was given, that
+`/api/docs` reports the version being built and lists the documentation set,
+that `/` serves the dashboard bundle rather than the "frontend not built"
+notice, and that the pipeline commands are on `PATH`. It then pushes that same
+local image, so what is published is what was tested.
+
 Both targets are built from the same context, filtered by `.dockerignore`. That
 file also keeps local data out of the build: an export written with no path
 lands in the repo root and is routinely hundreds of megabytes, so `*.jsonl.zst`,
@@ -257,7 +275,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: web
-          image: mailing-list-ai-check:1.15.3
+          image: ghcr.io/ietf-tools/mailing-list-ai-check:1.15.3
           ports:
             - {name: http, containerPort: 8050}
           envFrom:
@@ -342,7 +360,7 @@ spec:
             fsGroup: 1001
           containers:
             - name: pull
-              image: mailing-list-ai-check:1.15.3
+              image: ghcr.io/ietf-tools/mailing-list-ai-check:1.15.3
               command: ["mail-ai-pull", "--all-lists", "--incremental"]
               envFrom:
                 - configMapRef: {name: mlac-config}
@@ -369,9 +387,9 @@ kubectl -n mlac cp mlac-export-all-20260819.jsonl.zst \
   "$(kubectl -n mlac get pod -l app=mlac-web -o name | head -1 | cut -d/ -f2)":/data/import.jsonl.zst
 
 # 2. verify without writing, then import
-kubectl -n mlac create job mlac-import-dryrun --image=mailing-list-ai-check:1.15.3 \
+kubectl -n mlac create job mlac-import-dryrun --image=ghcr.io/ietf-tools/mailing-list-ai-check:1.15.3 \
   -- mail-ai-import /data/import.jsonl.zst --dry-run
-kubectl -n mlac create job mlac-import --image=mailing-list-ai-check:1.15.3 \
+kubectl -n mlac create job mlac-import --image=ghcr.io/ietf-tools/mailing-list-ai-check:1.15.3 \
   -- mail-ai-import /data/import.jsonl.zst
 ```
 

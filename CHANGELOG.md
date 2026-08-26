@@ -58,6 +58,9 @@ Summary: Container images for development and deployment, from one Dockerfile wi
 - Add `docs/deployment.md`: both image targets, the environment variables the image reads, and a Kubernetes deployment with the pipeline stages as jobs.
 - Add `k8s/`: the applyable manifests for a production cluster — namespace, `ReadWriteOnce` claim, config map, single-replica `Recreate` deployment and `ClusterIP` service — with a kustomization that applies the set.
 - Add `k8s/README.md`: the prerequisites, the apply commands, and the single-writer, read-only-root and probe constraints the manifests encode.
+- Add `.github/workflows/build.yml`: builds the `prod` image target on every push to `main` and every `v*` tag and publishes it to the GitHub Container Registry, tagged with the package version, `latest` and the commit sha.
+- Smoke-test the image in that workflow before publishing — configuration, documentation set, dashboard bundle and pipeline commands — and push the tested image itself rather than rebuilding it.
+- Fail the build when a `v*` tag does not match `__version__`.
 
 ## [1.15.3] - 2026-08-21
 
