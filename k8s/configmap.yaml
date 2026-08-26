@@ -18,7 +18,7 @@ data:
   # off while the scores/metadata CSV archive stays available.
   PUBLIC_READONLY: "1"
   ALLOW_EXPORT: "0"
-  ALLOW_STATS_EXPORT: "1"
+  ALLOW_STATS_EXPORT: "0"
   # Read by docker/mlac-web (gunicorn).
   WEB_WORKERS: "2"
   WEB_THREADS: "4"
