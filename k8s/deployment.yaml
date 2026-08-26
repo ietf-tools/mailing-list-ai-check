@@ -46,11 +46,17 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: web
-          # The tag tracks the package version, which `make image` reads from
-          # src/mailing_list_ai_check/__init__.py. Prefix it with the registry
-          # the cluster pulls from.
-          image: mailing-list-ai-check:1.15.3
-          imagePullPolicy: IfNotPresent
+          # Published by .github/workflows/build.yml. The tag tracks the
+          # package version, which is also what `make image` reads from
+          # src/mailing_list_ai_check/__init__.py; the workflow additionally
+          # pushes latest and sha-<commit>, and the sha tag is the one to pin
+          # when the deployed commit has to be unambiguous.
+          image: ghcr.io/ietf-tools/mailing-list-ai-check:$APP_IMAGE_TAG
+          # The version tag is overwritten by a later build at the same
+          # version, so a node that already holds it would otherwise keep a
+          # stale image. Set IfNotPresent when the tag above is an immutable
+          # sha-<commit> reference.
+          imagePullPolicy: Always
           # CMD is mlac-web; the pipeline commands are on PATH in the same image
           # and are run as Jobs (docs/deployment.md).
           ports:

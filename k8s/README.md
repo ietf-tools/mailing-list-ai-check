@@ -16,9 +16,12 @@ environment variables the image reads, and the pipeline stages as Jobs are in
 
 ## Prerequisites
 
-1. The image, in a registry the cluster can pull from. `make image` builds and
-   tags `mailing-list-ai-check:<version>` locally; retag and push it, then set
-   that reference as `image:` in `deployment.yaml`.
+1. The image. `.github/workflows/build.yml` publishes it to
+   `ghcr.io/ietf-tools/mailing-list-ai-check` on every push to `main` and every
+   `v*` tag, which is the reference `deployment.yaml` carries; a private cluster
+   also needs an `imagePullSecret` for that registry. `make image` builds the
+   same target locally, tagged `mailing-list-ai-check:<version>`, for a cluster
+   that pulls from somewhere else.
 2. A default `StorageClass` that provisions `ReadWriteOnce` volumes, or an
    explicit `storageClassName` in `pvc.yaml`.
 3. Credentials, only if the instance pulls mail or scores text. They are not in

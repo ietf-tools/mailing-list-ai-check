@@ -28,6 +28,24 @@ make image-dev    # docker build --target dev  -t mailing-list-ai-check:dev .
 needs network access: it installs the Python dependencies from PyPI and the
 frontend dependencies from the npm registry.
 
+`.github/workflows/build.yml` builds the same `prod` target on every push to
+`main` and every `v*` tag, and publishes it to
+`ghcr.io/<owner>/mailing-list-ai-check` — `ghcr.io/ietf-tools/mailing-list-ai-check`
+for this repository, and a fork's own path for a fork. Three tags are pushed:
+the package version, `latest` (default branch only), and `sha-<commit>`. The
+first two are overwritten by a later build at the same version, so `sha-<commit>`
+is the immutable reference to pin when the deployed commit must be unambiguous.
+A pull request builds and smoke-tests the image but publishes nothing.
+
+The workflow loads the built image into the runner's Docker daemon, runs it with
+the same hardening the Deployment applies (unprivileged user, read-only root
+filesystem, a writable `/tmp`, the database on a separate volume) and checks
+that `/api/capabilities` reports the configuration it was given, that
+`/api/docs` reports the version being built and lists the documentation set,
+that `/` serves the dashboard bundle rather than the "frontend not built"
+notice, and that the pipeline commands are on `PATH`. It then pushes that same
+local image, so what is published is what was tested.
+
 Both targets are built from the same context, filtered by `.dockerignore`. That
 file also keeps local data out of the build: an export written with no path
 lands in the repo root and is routinely hundreds of megabytes, so `*.jsonl.zst`,
