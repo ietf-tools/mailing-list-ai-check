@@ -481,6 +481,35 @@ def test_sender_rows_excludes_a_person_whose_addresses_are_all_excluded(store):
     assert shown["Bot Person"]["person_id"] == person.id
 
 
+def test_sender_rows_hides_a_shared_address_with_scoreable_mail(store):
+    # The datatracker address carries many people's mail; it is hidden from the
+    # pane even though its messages are scoreable, and shown with "Show all".
+    _add_sender_message(store, "noreply@ietf.org", "dt1")
+    _add_sender_message(store, "NoReply@ietf.org", "dt2")
+
+    assert "noreply" not in _by_name(store.sender_rows(per_page=200)[0])
+
+    shown, total = store.sender_rows(per_page=200, include_excluded=True)
+    entry = _by_name(shown)["noreply"]
+    assert entry["shared_address"] is True
+    assert entry["excluded_from_scoring"] is False
+    assert total == store.sender_rows(per_page=200)[1] + 1
+    # Every other sender is reported as not shared.
+    assert not any(e["shared_address"] for e in shown if e["name"] != "noreply")
+
+
+def test_sender_rows_does_not_flag_a_person_holding_a_shared_address(store):
+    msg = _add_sender_message(store, "noreply@ietf.org", "dtp")
+    address_id = store.conn.execute(
+        "SELECT address_id FROM messages WHERE id = ?", (msg.id,)
+    ).fetchone()["address_id"]
+    person = store.create_person("Datatracker")
+    store.assign_address_to_person(address_id, person.id)
+
+    entry = _by_name(store.sender_rows(per_page=200)[0])["Datatracker"]
+    assert entry["shared_address"] is False
+
+
 def test_sender_rows_unlinked_addresses(store):
     senders = _by_name(store.sender_rows(per_page=200)[0])
 

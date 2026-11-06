@@ -986,6 +986,16 @@ def _in_chunks(items: Sequence[Any], size: int = _IN_CHUNK) -> Iterator[Sequence
 #: sits far above five (the datatracker's, at 330, highest).
 MULTI_NAME_ADDRESS_THRESHOLD = 5
 
+#: Unlinked addresses that the Senders pane omits unless its "Show all" switch is
+#: on, because each one carries mail written by many different people. One row
+#: for such an address compares nothing about any one sender. Its messages stay
+#: scored and counted everywhere else in the dashboard.
+#:
+#: ``noreply@ietf.org`` is the datatracker's address: it delivers IESG ballot
+#: positions, review results and other notifications under the acting person's
+#: name (343 distinct ``From`` names in the archive, 2026-11-06).
+SHARED_SENDER_ADDRESSES = frozenset({"noreply@ietf.org"})
+
 
 #: The IETF list server's DMARC From-rewriting domain. When a list rewrites a
 #: sender whose domain publishes a strict DMARC policy, the message is re-sent
@@ -2392,6 +2402,11 @@ class Store:
         mixes. A sender with even one scoreable message is never dropped, and
         neither is one with no messages at all, having nothing to exclude.
 
+        ``shared_address`` is true for an unlinked address listed in
+        :data:`SHARED_SENDER_ADDRESSES` (one address carrying many people's
+        mail). Those entries are dropped on the same terms, unless
+        ``include_excluded`` is true. A person is never flagged this way.
+
         When ``list_name`` is given, message joins are restricted (via an extra
         ``AND m.list_id = ?`` inside the ``messages`` ON clause) so that
         ``message_count``, ``label_counts`` and ``too_short_count`` reflect only
@@ -2512,13 +2527,18 @@ class Store:
             entry["excluded_from_scoring"] = (
                 entry["message_count"] > 0 and entry["excluded_count"] == entry["message_count"]
             )
+            entry["shared_address"] = (
+                entry["type"] == "address" and entry["emails"][0].lower() in SHARED_SENDER_ADDRESSES
+            )
 
         if list_name is not None:
             # Scoped to a list: only senders who actually posted to it.
             entries = [e for e in entries if e["message_count"] > 0]
 
         if not include_excluded:
-            entries = [e for e in entries if not e["excluded_from_scoring"]]
+            entries = [
+                e for e in entries if not e["excluded_from_scoring"] and not e["shared_address"]
+            ]
 
         if q:
             needle = q.strip().lower()

@@ -258,7 +258,10 @@ shareable link.
   addresses) or a single unlinked address, searchable and sortable by volume or
   AI share. The ⇄ control links addresses into one person, with groupings
   suggested from matching display names, so one contributor's mail is analyzed
-  together.
+  together. Two kinds of sender are omitted unless "Show all" is on: senders
+  whose mail is all auto-generated, and so never scored, and shared addresses
+  that carry mail written by many people (`noreply@ietf.org`, the datatracker).
+  A shared address's messages are still scored and counted elsewhere.
 
 With a list in the filter, the lists pane becomes that list's statistics —
 message and scored counts, the detection mix, a timeline of the list's whole

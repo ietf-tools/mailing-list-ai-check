@@ -477,6 +477,7 @@ const rows = computed(() => {
         : historyAddresses.value[(e.emails[0] || '').toLowerCase()] || null,
       // Only ever true while "Show all" is on; the server omits these otherwise.
       excluded: !!e.excluded_from_scoring,
+      shared: !!e.shared_address,
       // The server decides when an address is named after itself rather than
       // after any one of its From names, and says so in named_by_address; the
       // threshold lives there alone. Explain it, or the label looks arbitrary.
@@ -571,7 +572,7 @@ async function assignToExisting(row) {
       <label
         v-if="!detailMode"
         class="show-all"
-        title="Show senders whose mail is all auto-generated, and so is never scored"
+        title="Show senders whose mail is all auto-generated, and so is never scored, and shared addresses that carry many people's mail"
       >
         <input
           type="checkbox"
@@ -695,6 +696,11 @@ async function assignToExisting(row) {
               class="excluded-tag"
               title="All of this sender's mail is auto-generated, so none of it is scored"
               >excluded</span
+            ><span
+              v-if="row.shared"
+              class="excluded-tag"
+              title="A shared address that sends mail written by many different people, so its row describes no single sender. Its messages are still scored."
+              >shared</span
             ></span
           >
           <span class="sender-count mono">{{ row.count }}</span>
@@ -973,7 +979,8 @@ async function assignToExisting(row) {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-/* Marks a sender none of whose mail is ever scored (only visible with "Show all"). */
+/* Marks a sender none of whose mail is ever scored, or a shared address (only
+   visible with "Show all"). */
 .excluded-tag {
   margin-left: 5px;
   padding: 0 4px;

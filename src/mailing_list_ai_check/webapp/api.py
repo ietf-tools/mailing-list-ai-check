@@ -1644,11 +1644,12 @@ def list_senders() -> Any:
     name), ``page`` (default 1), ``per_page`` (default 60, clamped to
     ``MAX_PER_PAGE``), ``include_excluded`` (boolean, default false — when
     false, senders whose every message is auto-generated, and so can never be
-    scored, are omitted; the pane's "Show all" switch sets it true). Bad input
-    yields a 400 like :func:`parse_filters`.
+    scored, are omitted, as are the shared addresses in
+    ``SHARED_SENDER_ADDRESSES``; the pane's "Show all" switch sets it true). Bad
+    input yields a 400 like :func:`parse_filters`.
 
-    Each entry reports ``excluded_count`` and ``excluded_from_scoring`` so the
-    pane can mark such senders when they are shown.
+    Each entry reports ``excluded_count``, ``excluded_from_scoring`` and
+    ``shared_address`` so the pane can mark such senders when they are shown.
 
     An unlinked address that has presented ``MULTI_NAME_ADDRESS_THRESHOLD`` or
     more different ``From`` names is named by its address rather than by any one

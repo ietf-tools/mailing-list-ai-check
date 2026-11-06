@@ -37,6 +37,14 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.16.2] - 2026-11-06
+
+Summary: The Senders pane omits shared addresses that carry many people's mail, starting with noreply@ietf.org.
+
+- Add SHARED_SENDER_ADDRESSES (noreply@ietf.org) and omit those unlinked addresses from /api/senders unless include_excluded is set; their messages remain scored.
+- Report shared_address on every /api/senders entry.
+- Mark shared addresses with a "shared" tag in the Senders pane when "Show all" is on.
+
 ## [1.16.1] - 2026-09-01
 
 Summary: The email-reply-extractor dependency is installed from PyPI instead of a git URL.

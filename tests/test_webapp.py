@@ -640,6 +640,31 @@ def test_senders_include_excluded_shows_them_flagged(db_path, client):
     assert _senders_by_name(body)["Carol"]["excluded_from_scoring"] is False
 
 
+def test_senders_omits_a_shared_address_by_default(db_path, client):
+    with Store(db_path) as store:
+        lst = store.upsert_list("announce", "Shared Folders/announce")
+        address = store.upsert_address("noreply@ietf.org", "Datatracker")
+        store.upsert_message(
+            message_id="<dt1@test>",
+            list_id=lst.id,
+            address_id=address.id,
+            subject="Ballot position",
+            date="2026-04-01T10:00:00",
+            in_reply_to=None,
+            raw_body="body",
+            uid=None,
+        )
+
+    body = client.get("/api/senders").get_json()
+    assert "Datatracker" not in _senders_by_name(body)
+    assert body["total"] == 5
+
+    body = client.get("/api/senders?include_excluded=true").get_json()
+    entry = _senders_by_name(body)["Datatracker"]
+    assert entry["shared_address"] is True
+    assert entry["excluded_from_scoring"] is False
+
+
 def test_senders_rejects_a_bad_include_excluded(client):
     resp = client.get("/api/senders?include_excluded=maybe")
     assert resp.status_code == 400
