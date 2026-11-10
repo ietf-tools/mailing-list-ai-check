@@ -265,7 +265,9 @@ def test_message_detail(client, db_path):
     assert body["thread_parent_id"] == m1_id  # resolved to stored parent
     assert body["extraction"]["extracted_text"] == "Body of Re: Intro to draft"
     assert body["score"]["label"] == "Human"
-    assert body["score"]["raw_response"]["prediction_short"] == "Human"
+    assert body["score"]["prediction_short"] == "Human"
+    # The stored Pangram response is not part of the detail payload.
+    assert "raw_response" not in body["score"]
 
 
 def test_message_detail_reports_ignored_lines_and_scored_word_count(client, db_path):

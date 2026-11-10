@@ -4,7 +4,7 @@
 :class:`mailing_list_ai_check.imap_client.ImapClient` calls (``login``, ``list``,
 ``select``, ``response``, ``uid``, ``close``, ``logout``) and interprets the
 ``UID SEARCH`` criteria the fetcher builds (``ALL`` / ``UID n:*`` / ``SINCE`` /
-``SENTSINCE`` / ``FROM``), so tests never touch the network.
+``SENTSINCE`` / ``SENTBEFORE`` / ``FROM``), so tests never touch the network.
 """
 
 from __future__ import annotations
@@ -91,6 +91,14 @@ class FakeFolder:
                     u
                     for u in uids
                     if self.sent_dates.get(u, self.dates.get(u, datetime.min)) >= since
+                }
+                j += 2
+            elif tok == "SENTBEFORE":
+                before = datetime.strptime(crit[j + 1], "%d-%b-%Y")
+                result &= {
+                    u
+                    for u in uids
+                    if self.sent_dates.get(u, self.dates.get(u, datetime.max)) < before
                 }
                 j += 2
             elif tok == "FROM":

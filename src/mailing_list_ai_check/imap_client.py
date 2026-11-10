@@ -53,34 +53,72 @@ class FolderStatus:
     exists: int | None
 
 
+#: Characters an RFC 3501 ``quoted`` string cannot carry at all (``QUOTED-CHAR``
+#: excludes CR and LF, and NUL is not a valid ``CHAR``). A value containing one
+#: would need a literal, which this client never sends; it is refused instead.
+_UNQUOTABLE = frozenset("\r\n\x00")
+
+
+def quote_imap_string(value: str) -> str:
+    """Return ``value`` as an RFC 3501 quoted string.
+
+    Backslash is escaped before double quote, so every ``\\`` and ``"`` in the
+    value reaches the server as data and the string cannot end early. Raises
+    :class:`ValueError` for a value containing CR, LF or NUL: those characters
+    cannot appear in a quoted string, and passing them through would end the
+    command line and let the remainder be read as a further command.
+    """
+    bad = _UNQUOTABLE.intersection(value)
+    if bad:
+        raise ValueError(
+            f"IMAP string contains a character that cannot be quoted "
+            f"({', '.join(sorted(repr(c) for c in bad))}): {value!r}"
+        )
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def unquote_imap_string(value: str) -> str:
+    """Reverse :func:`quote_imap_string` for a quoted string's contents.
+
+    ``value`` is the text between the surrounding double quotes; each ``\\x``
+    escape is replaced by ``x``.
+    """
+    return re.sub(r"\\(.)", r"\1", value)
+
+
 def quote_folder(folder: str) -> str:
     """Wrap a mailbox name in double quotes for ``SELECT``/``EXAMINE``.
 
     These folder names contain ``/`` and hyphens and must always be quoted
-    (findings §8).
+    (findings §8). Quoting follows :func:`quote_imap_string`, which also raises
+    :class:`ValueError` for a name containing CR, LF or NUL.
     """
-    return '"' + folder.replace('"', '\\"') + '"'
+    return quote_imap_string(folder)
 
 
 def build_search_criteria(
     *,
     since: str | None = None,
     sent_since: str | None = None,
+    sent_before: str | None = None,
     uid_range: str | None = None,
     from_addr: str | None = None,
 ) -> list[str]:
     """Build a server-side ``UID SEARCH`` criteria token list.
 
     Any combination of a ``SINCE`` date (``DD-Mon-YYYY``), a ``SENTSINCE``
-    date, a ``UID`` range (e.g. ``"42:*"`` for incremental pulls) and a single
+    date, a ``SENTBEFORE`` date, a ``UID`` range (e.g. ``"42:*"`` for incremental pulls) and a single
     ``FROM`` substring is AND-ed together. ``SINCE`` matches on INTERNALDATE
     (arrival in the folder); ``SENTSINCE`` matches on the message's own
     ``Date`` header (RFC 3501 base search key, live-verified on the archive
     server 2026-08-14), which lets a date-based pull exclude re-imported old
-    history before any body is downloaded. When nothing is supplied the
+    history before any body is downloaded; ``SENTBEFORE`` (also a Date-header
+    key, exclusive) bounds the period's end the same way. When nothing is supplied the
     criteria default to ``ALL``.
 
-    ``from_addr`` is quoted so multi-word display-name terms survive.
+    ``from_addr`` is quoted (see :func:`quote_imap_string`) so multi-word
+    display-name terms survive; a value containing CR, LF or NUL raises
+    :class:`ValueError`.
     """
     criteria: list[str] = []
     if uid_range is not None:
@@ -89,8 +127,10 @@ def build_search_criteria(
         criteria += ["SINCE", since]
     if sent_since is not None:
         criteria += ["SENTSINCE", sent_since]
+    if sent_before is not None:
+        criteria += ["SENTBEFORE", sent_before]
     if from_addr is not None:
-        criteria += ["FROM", f'"{from_addr}"']
+        criteria += ["FROM", quote_imap_string(from_addr)]
     return criteria or ["ALL"]
 
 
@@ -118,7 +158,8 @@ class ImapClient:
         """Return every selectable list folder (full ``Shared Folders/...`` name).
 
         Parses the ``LIST`` response, drops ``\\Noselect`` nodes (the namespace
-        root) and unquotes the mailbox names.
+        root) and unquotes the mailbox names, removing quoted-string escapes so
+        that :func:`quote_folder` reproduces the server's form.
         """
         typ, data = self._conn.list()  # type: ignore[attr-defined]
         if typ != "OK":
@@ -135,8 +176,8 @@ class ImapClient:
             if "\\noselect" in flags:
                 continue
             name = match.group("name").decode(errors="replace").strip()
-            if name.startswith('"') and name.endswith('"'):
-                name = name[1:-1]
+            if len(name) >= 2 and name.startswith('"') and name.endswith('"'):
+                name = unquote_imap_string(name[1:-1])
             folders.append(name)
         return folders
 

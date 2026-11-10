@@ -19,18 +19,22 @@ under the threaded dev server.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
 import tempfile
+import threading
+import time
 from bisect import bisect_right
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, Response, current_app, g, jsonify, request
+from werkzeug.routing import IntegerConverter
 
 from .. import __version__
 from email_reply_extractor import clean_for_scoring
@@ -68,7 +72,52 @@ from ..store import (
     Store,
 )
 
+log = logging.getLogger(__name__)
+
 api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+#: The signed 64-bit range of an SQLite ``INTEGER``. Python's ``sqlite3`` raises
+#: ``OverflowError`` for any int outside it, so every integer that can reach a
+#: query is checked against these bounds first.
+_SQLITE_INT_MIN = -(2**63)
+_SQLITE_INT_MAX = 2**63 - 1
+
+#: The largest ``page`` a paginated endpoint accepts. ``(page - 1) * per_page``
+#: becomes the query's ``OFFSET``, so the bound keeps that product far inside the
+#: SQLite integer range at the largest ``per_page`` (``MAX_PER_PAGE``), and is
+#: still orders of magnitude beyond the last page of a 100k-message store.
+_MAX_PAGE = 10_000_000
+
+#: Length caps on free-text query parameters (characters). ``q`` becomes a
+#: ``LIKE '%q%'`` scan over subjects and extracted text; the others are compared
+#: by equality. 320 is the RFC 3696 maximum length of an email address.
+_MAX_Q_LEN = 200
+_MAX_EMAIL_LEN = 320
+_MAX_LIST_NAME_LEN = 255
+_MAX_LABEL_LEN = 64
+
+
+class _DbIdConverter(IntegerConverter):
+    """A ``<db_id:...>`` URL segment: a non-negative id that fits SQLite's INTEGER.
+
+    Werkzeug's ``int`` converter accepts any run of digits, so an id beyond the
+    signed 64-bit range reached the store and raised ``OverflowError`` (a 500),
+    and a run longer than Python's int-string conversion limit raised
+    ``ValueError`` during routing (also a 500). This converter matches at most 19
+    digits and rejects values above ``_SQLITE_INT_MAX``, so either case is simply
+    an unmatched route: a 404, which is the right answer for an id that cannot
+    exist.
+    """
+
+    regex = r"\d{1,19}"
+
+    def __init__(self, map: Any) -> None:  # noqa: A002 - werkzeug's parameter name
+        super().__init__(map, max=_SQLITE_INT_MAX)
+
+
+# Registered on the app before any of this blueprint's rules are added (deferred
+# functions run in recording order), so the rules below can name ``db_id``.
+api_bp.record(lambda state: state.app.url_map.converters.setdefault("db_id", _DbIdConverter))
 
 #: Allowed characters in a mailing-list name (maps to an IMAP folder slug):
 #: letters, digits, dot, hyphen, underscore. Guards against odd/injection-y
@@ -99,6 +148,23 @@ class ApiError(Exception):
         self.status = status
 
 
+#: The client-facing message for any failure to open an IMAP connection.
+_IMAP_CONNECT_FAILED = "could not connect to the IMAP server"
+
+
+def _imap_error(message: str, exc: BaseException) -> ApiError:
+    """Log an IMAP-side failure server-side and return a generic 502 for the client.
+
+    The exception text of a socket or IMAP error can carry the configured host
+    and port, server greeting and response lines, or a login name echoed in a
+    ``NO`` response, so it goes to the log only and the client receives the
+    fixed ``message``. Only the exception is logged — never the config object,
+    which holds the IMAP password and the Pangram API key.
+    """
+    log.warning("%s: %s: %s", message, type(exc).__name__, exc)
+    return ApiError(f"{message} (details are in the server log)", 502)
+
+
 # --- per-request store --------------------------------------------------------
 
 
@@ -113,21 +179,72 @@ def get_store() -> Store:
 
 
 def _parse_int(name: str, raw: str | None) -> int | None:
+    """Parse an optional integer query param; 400 if malformed or out of range.
+
+    The range is SQLite's signed 64-bit ``INTEGER``, so a parsed value can always
+    be bound into a query (an int outside it raises ``OverflowError`` in
+    ``sqlite3``). A digit string past Python's int-conversion limit is a
+    ``ValueError`` and so a 400 as well.
+    """
     if raw is None or raw == "":
         return None
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError as exc:
         raise ApiError(f"{name} must be an integer") from exc
+    if not (_SQLITE_INT_MIN <= value <= _SQLITE_INT_MAX):
+        raise ApiError(f"{name} is out of range")
+    return value
 
 
 def _parse_float(name: str, raw: str | None) -> float | None:
+    """Parse an optional float query param; 400 if malformed, NaN or infinite.
+
+    ``float()`` accepts ``nan`` and ``inf`` (and overflows such as ``1e999`` to
+    ``inf``); NaN in particular passes every ``<``/``>`` range check because all
+    its comparisons are false, so non-finite values are refused here.
+    """
     if raw is None or raw == "":
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ApiError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise ApiError(f"{name} must be a finite number")
+    return value
+
+
+def _parse_text(name: str, raw: str | None, max_len: int) -> str | None:
+    """Return an optional free-text param (``None`` when absent or empty).
+
+    A value longer than ``max_len`` characters is a 400. No other normalisation
+    is applied, so an accepted value reaches the store exactly as before.
+    """
+    if raw is None or raw == "":
+        return None
+    if len(raw) > max_len:
+        raise ApiError(f"{name} must be at most {max_len} characters")
+    return raw
+
+
+def _parse_page(raw: str | None) -> int:
+    """Parse ``page`` (default 1): an integer in ``1.._MAX_PAGE``, else a 400."""
+    page = _parse_int("page", raw)
+    if page is None:
+        return 1
+    if page < 1:
+        raise ApiError("page must be >= 1")
+    if page > _MAX_PAGE:
+        raise ApiError(f"page must be <= {_MAX_PAGE}")
+    return page
+
+
+def _check_db_int(name: str, value: int) -> int:
+    """400 unless ``value`` (an int from a JSON body) fits SQLite's INTEGER."""
+    if not (_SQLITE_INT_MIN <= value <= _SQLITE_INT_MAX):
+        raise ApiError(f"{name} contains an out-of-range id")
+    return value
 
 
 def _parse_bool(name: str, raw: str | None) -> bool | None:
@@ -160,11 +277,7 @@ def parse_filters(args: Any) -> MessageFilters:
     Raises :class:`ApiError` (400) on any malformed value so callers never see a
     500 for bad input. ``per_page`` above the cap is clamped, not rejected.
     """
-    page = _parse_int("page", args.get("page"))
-    if page is None:
-        page = 1
-    elif page < 1:
-        raise ApiError("page must be >= 1")
+    page = _parse_page(args.get("page"))
 
     per_page = _parse_int("per_page", args.get("per_page"))
     if per_page is None:
@@ -198,15 +311,15 @@ def parse_filters(args: Any) -> MessageFilters:
             raise ApiError(f"{label} must be >= 0")
 
     return MessageFilters(
-        list_name=args.get("list") or None,
-        address=args.get("address") or None,
+        list_name=_parse_text("list", args.get("list"), _MAX_LIST_NAME_LEN),
+        address=_parse_text("address", args.get("address"), _MAX_EMAIL_LEN),
         person_id=_parse_int("person", args.get("person")),
         date_from=_validate_iso("date_from", args.get("date_from")),
         date_to=_validate_iso("date_to", args.get("date_to")),
-        label=args.get("label") or None,
+        label=_parse_text("label", args.get("label"), _MAX_LABEL_LEN),
         min_likelihood=min_l,
         max_likelihood=max_l,
-        q=args.get("q") or None,
+        q=_parse_text("q", args.get("q"), _MAX_Q_LEN),
         has_score=_parse_bool("has_score", args.get("has_score")),
         cpm_min=cpm_min,
         cpm_max=cpm_max,
@@ -451,7 +564,7 @@ def _address_id_list(data: dict[str, Any], key: str) -> list[int]:
     for item in raw:
         if isinstance(item, bool) or not isinstance(item, int):
             raise ApiError(f"{key} must contain integer address ids")
-        ids.append(item)
+        ids.append(_check_db_int(key, item))
     return ids
 
 
@@ -505,7 +618,7 @@ def list_messages() -> Any:
     )
 
 
-@api_bp.get("/messages/<int:message_id>")
+@api_bp.get("/messages/<db_id:message_id>")
 def message_detail(message_id: int) -> Any:
     store = get_store()
     msg = store.get_message(message_id)
@@ -568,7 +681,10 @@ def message_detail(message_id: int) -> Any:
             ),
             "detector_version": score.detector_version,
             "scored_at": score.scored_at,
-            "raw_response": raw_response,
+            # The stored Pangram response itself is not returned: it repeats
+            # the analysed text and every window's text, and the dashboard
+            # reads only the fields derived from it above. It remains
+            # available through the full export.
         }
 
     return jsonify(
@@ -635,7 +751,7 @@ def _fetch_for_list(config: Any, store: Store, list_name: str, count: int) -> An
             config.imap_host, config.imap_port, config.imap_username, config.imap_password
         )
     except Exception as exc:  # noqa: BLE001 - report any connection failure cleanly
-        raise ApiError(f"could not connect to the IMAP server: {exc}", 502) from exc
+        raise _imap_error(_IMAP_CONNECT_FAILED, exc) from exc
 
     try:
         folders = resolve_folders(client, [list_name], all_lists=False)
@@ -646,7 +762,7 @@ def _fetch_for_list(config: Any, store: Store, list_name: str, count: int) -> An
         )
         return run_fetch(client, store, fetch_request)
     except Exception as exc:  # noqa: BLE001 - IMAP/fetch failures become a 502
-        raise ApiError(f"IMAP fetch failed for list {list_name!r}: {exc}", 502) from exc
+        raise _imap_error(f"IMAP fetch failed for list {list_name!r}", exc) from exc
     finally:
         try:
             client.close()
@@ -920,7 +1036,7 @@ def _message_id_list(data: dict[str, Any]) -> list[int]:
     for item in raw:
         if isinstance(item, bool) or not isinstance(item, int):
             raise ApiError("ids must contain integer message ids")
-        ids.append(item)
+        ids.append(_check_db_int("ids", item))
     return ids
 
 
@@ -1198,7 +1314,7 @@ def _open_client_or_502(config: Any) -> Any:
             config.imap_host, config.imap_port, config.imap_username, config.imap_password
         )
     except Exception as exc:  # noqa: BLE001 - report any connection failure cleanly
-        raise ApiError(f"could not connect to the IMAP server: {exc}", 502) from exc
+        raise _imap_error(_IMAP_CONNECT_FAILED, exc) from exc
 
 
 def _close_client_quietly(client: Any) -> None:
@@ -1363,7 +1479,7 @@ def preview() -> Any:
     except ApiError:
         raise
     except Exception as exc:  # noqa: BLE001 - IMAP/enumeration failures become a 502
-        raise ApiError(f"IMAP preview failed for list {list_name!r}: {exc}", 502) from exc
+        raise _imap_error(f"IMAP preview failed for list {list_name!r}", exc) from exc
     finally:
         _close_client_quietly(client)
 
@@ -1428,7 +1544,7 @@ def _run_range_fetch(
     except ApiError:
         raise
     except Exception as exc:  # noqa: BLE001 - IMAP/fetch failures become a 502
-        raise ApiError(f"IMAP ranged pull failed for list {list_row.name!r}: {exc}", 502) from exc
+        raise _imap_error(f"IMAP ranged pull failed for list {list_row.name!r}", exc) from exc
     finally:
         _close_client_quietly(client)
 
@@ -1534,12 +1650,12 @@ def regenerate_lists() -> Any:
             config.imap_host, config.imap_port, config.imap_username, config.imap_password
         )
     except Exception as exc:  # noqa: BLE001 - report any connection failure cleanly
-        raise ApiError(f"could not connect to the IMAP server: {exc}", 502) from exc
+        raise _imap_error(_IMAP_CONNECT_FAILED, exc) from exc
 
     try:
         counts = refresh_lists_index(client, get_store())
     except Exception as exc:  # noqa: BLE001 - IMAP failures become a 502
-        raise ApiError(f"IMAP list enumeration failed: {exc}", 502) from exc
+        raise _imap_error("IMAP list enumeration failed", exc) from exc
     finally:
         try:
             client.close()
@@ -1569,7 +1685,7 @@ def list_timelines() -> Any:
     no point (see :meth:`Store.list_timelines`). An unknown ``list`` yields an
     empty ``lists`` rather than a 404.
     """
-    list_name = request.args.get("list") or None
+    list_name = _parse_text("list", request.args.get("list"), _MAX_LIST_NAME_LEN)
     result = get_store().list_timelines(list_name)
     result["buckets"] = list(TIMELINE_BUCKETS)
     return jsonify(result)
@@ -1597,7 +1713,7 @@ def list_thread_graph() -> Any:
     ``prediction_short``, ``timing_cpm`` and ``parent_id``. See
     :meth:`Store.thread_graph` for the exact ordering and reply linkage.
     """
-    list_name = request.args.get("list") or None
+    list_name = _parse_text("list", request.args.get("list"), _MAX_LIST_NAME_LEN)
     if not list_name:
         raise ApiError("pass a 'list'")
     store = get_store()
@@ -1618,7 +1734,7 @@ def list_thread_graph() -> Any:
 
 @api_bp.get("/addresses")
 def list_addresses() -> Any:
-    q = request.args.get("q") or None
+    q = _parse_text("q", request.args.get("q"), _MAX_Q_LEN)
     return jsonify({"addresses": get_store().address_rows(q)})
 
 
@@ -1658,8 +1774,8 @@ def list_senders() -> Any:
     """
     args = request.args
 
-    q = args.get("q") or None
-    list_name = args.get("list") or None
+    q = _parse_text("q", args.get("q"), _MAX_Q_LEN)
+    list_name = _parse_text("list", args.get("list"), _MAX_LIST_NAME_LEN)
 
     sort = args.get("sort", "count")
     if sort not in _SENDER_SORTS:
@@ -1673,11 +1789,7 @@ def list_senders() -> Any:
         if order not in ("asc", "desc"):
             raise ApiError("order must be 'asc' or 'desc'")
 
-    page = _parse_int("page", args.get("page"))
-    if page is None:
-        page = 1
-    elif page < 1:
-        raise ApiError("page must be >= 1")
+    page = _parse_page(args.get("page"))
 
     per_page = _parse_int("per_page", args.get("per_page"))
     if per_page is None:
@@ -1736,7 +1848,7 @@ def sender_reply_rugs() -> Any:
     """
     args = request.args
     person_raw = args.get("person") or None
-    address = args.get("address") or None
+    address = _parse_text("address", args.get("address"), _MAX_EMAIL_LEN)
     if (person_raw is None) == (address is None):
         raise ApiError("pass exactly one of 'person' or 'address'")
 
@@ -1773,13 +1885,17 @@ def sender_timelines() -> Any:
     """
     args = request.args
     persons_raw = [p for p in (args.get("persons") or "").split(",") if p.strip()]
-    person_ids = [_parse_int("persons", p) for p in persons_raw]
     addresses = [a for a in (args.get("addresses") or "").split(",") if a.strip()]
-    if not person_ids and not addresses:
+    if not persons_raw and not addresses:
         raise ApiError("pass 'persons' and/or 'addresses'")
-    if len(person_ids) + len(addresses) > MAX_PER_PAGE:
+    if len(persons_raw) + len(addresses) > MAX_PER_PAGE:
         raise ApiError(f"at most {MAX_PER_PAGE} senders per request")
-    list_name = args.get("list") or None
+    # Each id is range-checked like any other integer param; each email is
+    # length-capped like the ``address`` filter.
+    person_ids = [_parse_int("persons", p) for p in persons_raw]
+    for email in addresses:
+        _parse_text("addresses", email, _MAX_EMAIL_LEN)
+    list_name = _parse_text("list", args.get("list"), _MAX_LIST_NAME_LEN)
 
     result = get_store().sender_timelines(
         person_ids=person_ids, addresses=addresses, list_name=list_name
@@ -1824,7 +1940,7 @@ def create_person() -> Any:
     return jsonify(_person_detail(store, person.id)), 201
 
 
-@api_bp.put("/persons/<int:person_id>")
+@api_bp.put("/persons/<db_id:person_id>")
 def update_person(person_id: int) -> Any:
     store = get_store()
     if store.get_person(person_id) is None:
@@ -1850,7 +1966,7 @@ def update_person(person_id: int) -> Any:
     return jsonify(_person_detail(store, person_id))
 
 
-@api_bp.delete("/persons/<int:person_id>")
+@api_bp.delete("/persons/<db_id:person_id>")
 def delete_person(person_id: int) -> Any:
     store = get_store()
     if not store.delete_person(person_id):
@@ -1879,6 +1995,88 @@ def _export_slug(list_names: Sequence[str]) -> str:
 #: a download is this, not the export size.
 _EXPORT_CHUNK_BYTES = 64 * 1024
 
+#: Seconds a client is told to wait (``Retry-After``) when an export is refused
+#: because another one of the same kind is already in progress.
+_EXPORT_RETRY_AFTER_SECONDS = 30
+
+#: Age after which a held export slot is presumed leaked and may be taken over.
+#: Every exit path releases the slot (see :class:`_ExportGate`); this is a
+#: backstop so that a path nobody anticipated degrades to one extra concurrent
+#: build rather than disabling exports until the worker restarts. It matches
+#: the documented gunicorn request timeout (``WEB_TIMEOUT``, 1800 s).
+_EXPORT_SLOT_STALE_SECONDS = 1800.0
+
+
+class _ExportGate:
+    """Admits at most one export build-and-stream at a time, without blocking.
+
+    Each export endpoint builds its whole selection into a temporary file before
+    streaming it (~220 MB for the full export of a 100k-message store), so
+    unthrottled concurrent requests would occupy every worker thread for minutes
+    and multiply temporary-disk use. One gate exists per endpoint kind per Flask
+    app (see :func:`_export_gate`). gunicorn creates one app per worker process,
+    so the limit is **per process**: a deployment with N workers can run up to N
+    builds of each kind at once.
+
+    :meth:`try_acquire` never waits: it returns a release callable, or ``None``
+    when the slot is taken. The release callable is idempotent and bound to its
+    own acquisition, so calling it twice — or late, after a stale slot was taken
+    over — never frees someone else's slot.
+    """
+
+    def __init__(self, stale_after: float) -> None:
+        self._lock = threading.Lock()
+        self._holder: object | None = None
+        self._since = 0.0
+        self._stale_after = stale_after
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return self._holder is not None
+
+    def try_acquire(self) -> Callable[[], None] | None:
+        with self._lock:
+            now = time.monotonic()
+            if self._holder is not None:
+                if now - self._since < self._stale_after:
+                    return None
+                log.warning(
+                    "export slot held for over %.0f s; presuming it leaked and taking it over",
+                    self._stale_after,
+                )
+            token = object()
+            self._holder = token
+            self._since = now
+
+        def release() -> None:
+            with self._lock:
+                if self._holder is token:
+                    self._holder = None
+
+        return release
+
+
+_EXPORT_GATES_LOCK = threading.Lock()
+
+
+def _export_gate(kind: str) -> _ExportGate:
+    """This app's :class:`_ExportGate` for ``kind`` (``"full"`` or ``"stats"``)."""
+    with _EXPORT_GATES_LOCK:
+        gates = current_app.extensions.setdefault("mlac_export_gates", {})
+        gate = gates.get(kind)
+        if gate is None:
+            gate = gates[kind] = _ExportGate(_EXPORT_SLOT_STALE_SECONDS)
+        return gate
+
+
+def _export_busy_response() -> Any:
+    """The JSON 429 sent when an export of the same kind is already running."""
+    response = jsonify({"error": "another export is in progress on this server; retry shortly"})
+    response.status_code = 429
+    response.headers["Retry-After"] = str(_EXPORT_RETRY_AFTER_SECONDS)
+    return response
+
 
 def _unlink_quietly(path: str) -> bool:
     """Remove ``path``; return whether it is gone. Never raises."""
@@ -1896,18 +2094,23 @@ def _selected_lists(args: Any) -> list[str]:
 
     A name sent twice does not ask the exporter for the same list twice. Empty
     values are dropped, which keeps a bare ``?list=`` meaning "every list" rather
-    than "the list called ''".
+    than "the list called ''". A name longer than ``_MAX_LIST_NAME_LEN`` is a 400.
     """
-    names: list[str] = []
+    names: dict[str, None] = {}
     for raw in args.getlist("list"):
-        name = raw.strip()
-        if name and name not in names:
-            names.append(name)
-    return names
+        name = _parse_text("list", raw.strip(), _MAX_LIST_NAME_LEN)
+        if name:
+            names.setdefault(name, None)
+    return list(names)
 
 
 def _download_temp_file(
-    serve_path: str, temp_paths: set[str], *, filename: str, mimetype: str
+    serve_path: str,
+    temp_paths: set[str],
+    *,
+    filename: str,
+    mimetype: str,
+    on_release: Callable[[], None] | None = None,
 ) -> Response:
     """Stream a finished temporary export file back as an attachment, then delete it.
 
@@ -1949,6 +2152,11 @@ def _download_temp_file(
     ``direct_passthrough`` hand-off to ``wsgi.file_wrapper`` would put the body
     outside our control while adding range/conditional handling that a file which
     exists for exactly one request cannot honour.
+
+    ``on_release`` (optional, idempotent) runs once the descriptor is dropped, on
+    every one of the paths above and on a failing open. The export endpoints pass
+    their :class:`_ExportGate` slot's release here, so the slot is held exactly as
+    long as the download and freed however it ends.
     """
     fh = None
     try:
@@ -1959,6 +2167,8 @@ def _download_temp_file(
             fh.close()
         for path in temp_paths:
             _unlink_quietly(path)
+        if on_release is not None:
+            on_release()
         raise
 
     # Unlink while the descriptor is open, so the bytes stay readable through
@@ -1968,10 +2178,14 @@ def _download_temp_file(
 
     def release() -> None:
         """Drop the descriptor, and any name the unlink above could not remove."""
-        fh.close()
-        for leftover in tuple(pending):
-            if _unlink_quietly(leftover):
-                pending.discard(leftover)
+        try:
+            fh.close()
+            for leftover in tuple(pending):
+                if _unlink_quietly(leftover):
+                    pending.discard(leftover)
+        finally:
+            if on_release is not None:
+                on_release()
 
     def stream() -> Iterator[bytes]:
         try:
@@ -1994,6 +2208,82 @@ def _download_temp_file(
     return response
 
 
+def _require_known_lists(store: Store, list_names: Sequence[str]) -> None:
+    """404 for the first named list the store does not hold.
+
+    Checked before an export takes its slot or creates a temporary file, so an
+    unknown name costs one indexed lookup. The message names the list as the
+    client sent it (already length-capped by :func:`_selected_lists`) and
+    carries nothing else.
+    """
+    for name in list_names:
+        if store.get_list_by_name(name) is None:
+            raise ApiError(f"unknown list name: {name!r}", 404)
+
+
+def _build_and_serve_export(
+    kind: str,
+    build: Callable[[str], Any],
+    *,
+    suffix: str,
+    filename: str,
+    mimetype: str,
+) -> Any:
+    """Build an export into a temporary file under the ``kind`` gate, then stream it.
+
+    Shared by :func:`export` and :func:`export_stats_download`. ``build`` writes
+    the export to the path it is given and returns a summary with ``path``,
+    ``lists`` and ``messages``. When another export of the same ``kind`` holds
+    this process's slot (see :class:`_ExportGate`), the response is a JSON 429
+    with ``Retry-After`` and nothing is built.
+
+    The slot is released on every path: a failed build or the "nothing to
+    export" 404 release it here, before the exception propagates; a successful
+    build hands the release to :func:`_download_temp_file`, which runs it when the
+    descriptor is dropped — at the end of the stream, on a client disconnect, on
+    a HEAD request whose body never starts, or on a failing open.
+    """
+    release_slot = _export_gate(kind).try_acquire()
+    if release_slot is None:
+        return _export_busy_response()
+
+    tmp_path = written_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        written_path = tmp_path
+        try:
+            summary = build(tmp_path)
+        except ValueError as exc:
+            # The selection is validated before the build (_require_known_lists),
+            # so this is a list removed in between. Any other ValueError is an
+            # internal fault and stays a 500 rather than reaching the client.
+            if not str(exc).startswith("unknown list name:"):
+                raise
+            raise ApiError(str(exc), 404) from exc
+        written_path = summary.path
+
+        # No message in scope is nothing to download, whether the database is
+        # empty, no list has mail, or the date range excludes all of it. Named
+        # lists are checked on messages rather than on ``lists`` because a named
+        # list always resolves — it is the range that can empty it.
+        if summary.lists == 0 or summary.messages == 0:
+            raise ApiError("nothing to export", 404)
+    except BaseException:
+        for path in {tmp_path, written_path} - {None}:
+            _unlink_quietly(path)
+        release_slot()
+        raise
+
+    return _download_temp_file(
+        written_path,
+        {tmp_path, written_path},
+        filename=filename,
+        mimetype=mimetype,
+        on_release=release_slot,
+    )
+
+
 @api_bp.get("/export")
 def export() -> Any:
     """Download selected messages and their pipeline state as a zstd JSON Lines export.
@@ -2013,7 +2303,10 @@ def export() -> Any:
     IMAP or Pangram calls, and message bodies are never logged.
 
     The finished file is streamed and cleaned up by :func:`_download_temp_file`,
-    whose docstring covers the temp-file lifetime.
+    whose docstring covers the temp-file lifetime. At most one full export is
+    built and streamed at a time per server process; a request arriving while
+    one is in flight is a JSON 429 with ``Retry-After`` (see
+    :func:`_build_and_serve_export`).
 
     Served only when ``ALLOW_EXPORT`` is on (the default); a disabled instance
     refuses it with a 403 before any database read.
@@ -2025,47 +2318,29 @@ def export() -> Any:
     list_names = _selected_lists(request.args)
     date_from = _validate_iso("date_from", request.args.get("date_from"))
     date_to = _validate_iso("date_to", request.args.get("date_to"))
+    _require_known_lists(store, list_names)
+
+    def build(tmp_path: str) -> Any:
+        return export_lists(
+            store,
+            list_names or None,
+            tmp_path,
+            all_lists=not list_names,
+            date_from=date_from,
+            date_to=date_to,
+        )
 
     # The temp name already carries the compressed suffix the exporter would
     # otherwise append, so it is written in place. The summary reports the path
     # actually written either way, and that — not the name guessed here — is what
     # gets served and unlinked.
-    fd, tmp_path = tempfile.mkstemp(suffix=".jsonl.zst")
-    os.close(fd)
-    written_path = tmp_path
-    try:
-        try:
-            summary = export_lists(
-                store,
-                list_names or None,
-                tmp_path,
-                all_lists=not list_names,
-                date_from=date_from,
-                date_to=date_to,
-            )
-        except ValueError as exc:
-            # Unknown list name (the only ValueError export_lists raises for input).
-            raise ApiError(str(exc), 404) from exc
-        written_path = summary.path
-
-        # No message in scope is nothing to download, whether the database is
-        # empty, no list has mail, or the date range excludes all of it. Named
-        # lists are checked on messages rather than on ``lists`` because a named
-        # list always resolves — it is the range that can empty it.
-        if summary.lists == 0 or summary.messages == 0:
-            raise ApiError("nothing to export", 404)
-    except BaseException:
-        for path in {tmp_path, written_path}:
-            _unlink_quietly(path)
-        raise
-
-    filename = (
-        f"mlac-export-{_export_slug(list_names)}-{datetime.now().strftime('%Y%m%d')}.jsonl.zst"
-    )
-    return _download_temp_file(
-        written_path,
-        {tmp_path, written_path},
-        filename=filename,
+    return _build_and_serve_export(
+        "full",
+        build,
+        suffix=".jsonl.zst",
+        filename=(
+            f"mlac-export-{_export_slug(list_names)}-{datetime.now().strftime('%Y%m%d')}.jsonl.zst"
+        ),
         mimetype="application/zstd",
     )
 
@@ -2084,7 +2359,9 @@ def export_stats_download() -> Any:
     ``mlac-stats-<slug>-<YYYYMMDD>.zip``, with the same ``<slug>`` rules as the
     full export and the same streaming and temp-file handling (see
     :func:`_download_temp_file`). It carries no message text and cannot be
-    imported. A local database read only — no IMAP or Pangram calls.
+    imported. A local database read only — no IMAP or Pangram calls. As with the
+    full export, one stats export runs at a time per server process and a
+    concurrent request is a JSON 429 with ``Retry-After``.
 
     Served only when ``ALLOW_STATS_EXPORT`` is on (the default); a disabled
     instance refuses it with a 403 before any database read.
@@ -2096,38 +2373,39 @@ def export_stats_download() -> Any:
     list_names = _selected_lists(request.args)
     date_from = _validate_iso("date_from", request.args.get("date_from"))
     date_to = _validate_iso("date_to", request.args.get("date_to"))
+    _require_known_lists(store, list_names)
 
-    fd, tmp_path = tempfile.mkstemp(suffix=".zip")
-    os.close(fd)
-    written_path = tmp_path
-    try:
-        try:
-            summary = export_stats(
-                store,
-                list_names or None,
-                tmp_path,
-                all_lists=not list_names,
-                date_from=date_from,
-                date_to=date_to,
-            )
-        except ValueError as exc:
-            # Unknown list name (the only ValueError export_stats raises for input).
-            raise ApiError(str(exc), 404) from exc
-        written_path = summary.path
-        if summary.lists == 0 or summary.messages == 0:
-            raise ApiError("nothing to export", 404)
-    except BaseException:
-        for path in {tmp_path, written_path}:
-            _unlink_quietly(path)
-        raise
+    def build(tmp_path: str) -> Any:
+        return export_stats(
+            store,
+            list_names or None,
+            tmp_path,
+            all_lists=not list_names,
+            date_from=date_from,
+            date_to=date_to,
+        )
 
-    filename = f"mlac-stats-{_export_slug(list_names)}-{datetime.now().strftime('%Y%m%d')}.zip"
-    return _download_temp_file(
-        written_path,
-        {tmp_path, written_path},
-        filename=filename,
+    return _build_and_serve_export(
+        "stats",
+        build,
+        suffix=".zip",
+        filename=f"mlac-stats-{_export_slug(list_names)}-{datetime.now().strftime('%Y%m%d')}.zip",
         mimetype="application/zip",
     )
+
+
+def _without_path(message: str, path: str) -> str:
+    """``message`` with every spelling of the server-side ``path`` replaced.
+
+    Import errors name the file they could not read (``cannot read
+    /tmp/tmpXXXX.jsonl: ...``), which here is the server's temporary copy of the
+    upload: a filesystem detail of no use to the client. The line number and
+    reason are kept, since the dashboard shows them to the operator.
+    """
+    spellings = {path, os.path.abspath(path), os.path.realpath(path)}
+    for spelling in sorted(spellings, key=len, reverse=True):
+        message = message.replace(spelling, "the uploaded file")
+    return message
 
 
 @api_bp.post("/import")
@@ -2159,7 +2437,7 @@ def import_() -> Any:
         try:
             summary = import_file(get_store(), tmp_path, dry_run=dry_run)
         except ExportImportError as exc:
-            raise ApiError(str(exc)) from exc
+            raise ApiError(_without_path(str(exc), tmp_path)) from exc
     finally:
         try:
             os.unlink(tmp_path)

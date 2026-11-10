@@ -32,6 +32,26 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_list(name: str) -> tuple[str, ...]:
+    """Read a comma-separated env var as a tuple of non-empty, trimmed items."""
+    raw = os.environ.get(name, "")
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    """Read a positive integer env var; unset or empty is ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class Config:
     imap_host: str
@@ -52,13 +72,25 @@ class Config:
     #: Whether ``GET /api/export`` (the full corpus download, message bodies
     #: included) is served. These two export switches are GET endpoints that the
     #: read-only guard does not cover; set this false to refuse the full export
-    #: with a 403 on an instance whose message text should not be downloadable.
-    #: On by default, so a normal instance is unchanged.
+    #: with a 403 on an instance whose message text should not be downloadable
+    #: in bulk. It does not withhold text from the dashboard: the message detail
+    #: endpoint still returns each message's body. On by default, so a normal
+    #: instance is unchanged.
     allow_export: bool = True
     #: Whether ``GET /api/export/stats`` (the scores/metadata CSV archive, which
     #: carries no message text) is served. Set false to refuse it with a 403. On
     #: by default.
     allow_stats_export: bool = True
+    #: Hostnames the web app answers to (the ``Host`` header, port ignored). A
+    #: request naming any other host is refused with a 400, which defeats DNS
+    #: rebinding. ``("*",)`` disables the check. Empty (the default) means: only
+    #: the loopback names when ``flask_host`` is a loopback address, and no check
+    #: otherwise (a container bound to 0.0.0.0 behind an ingress, whose hostname
+    #: the app cannot know; such an instance should set ``ALLOWED_HOSTS``).
+    allowed_hosts: tuple[str, ...] = ()
+    #: Largest request body accepted by ``POST /api/import``, in MiB. Every
+    #: other endpoint is limited to 1 MiB regardless. Larger requests get a 413.
+    max_upload_mb: int = 1024
 
     @classmethod
     def load(cls) -> "Config":
@@ -79,4 +111,6 @@ class Config:
             public_readonly=_env_bool("PUBLIC_READONLY", False),
             allow_export=_env_bool("ALLOW_EXPORT", True),
             allow_stats_export=_env_bool("ALLOW_STATS_EXPORT", True),
+            allowed_hosts=_env_list("ALLOWED_HOSTS"),
+            max_upload_mb=_env_positive_int("MAX_UPLOAD_MB", 1024),
         )

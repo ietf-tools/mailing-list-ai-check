@@ -26,6 +26,10 @@ from mailing_list_ai_check.store import Store
         ["announce", "--days", "-1"],  # non-positive days
         ["announce", "--since", "not-a-date"],  # bad date
         ["announce", "--count", "5", "--limit", "0"],  # non-positive limit
+        ["announce", "--count", "5", "--until", "2025-02-01"],  # --until without --since
+        ["announce", "--since", "2025-01-01", "--until", "nope"],  # bad --until date
+        ["announce", "--since", "2025-01-01", "--until", "2025-01-01"],  # empty period
+        ["announce", "--backfill-headers", "--until", "2025-01-01"],  # backfill + --until
     ],
 )
 def test_cli_rejects_bad_args(argv):
@@ -46,6 +50,14 @@ def test_days_resolves_to_since_iso():
     assert depth.since is not None
     # a plausible ISO date string
     datetime.strptime(depth.since, "%Y-%m-%d")
+
+
+def test_until_resolves_onto_the_since_depth():
+    ns = cli.build_parser().parse_args(
+        ["announce", "--since", "2024-07-01", "--until", "2024-08-01"]
+    )
+    depth = cli._resolve_depth(ns)
+    assert (depth.since, depth.until) == ("2024-07-01", "2024-08-01")
 
 
 def test_all_lists_incremental_requires_a_cursor():

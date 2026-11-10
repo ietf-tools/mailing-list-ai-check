@@ -1830,6 +1830,132 @@ def test_import_missing_file_still_raises_file_not_found(target, tmp_path):
 
 
 # ==============================================================================
+# IMPORT -- resource limits and hostile input
+# ==============================================================================
+
+
+def _decompressed_lines(path: Path) -> list[str]:
+    with codec.open_read_text(path) as fh:
+        return fh.read().splitlines(keepends=True)
+
+
+def test_default_limits_cover_the_records_a_real_store_holds():
+    # Largest measured record components sum to about 2.3 million characters.
+    assert export_import.MAX_LINE_CHARS >= 10 * 2_400_000
+    assert export_import.MAX_TOTAL_CHARS >= 10 * 3_700_000_000
+
+
+def test_a_normal_export_imports_at_exactly_its_own_sizes(source, target, tmp_path):
+    """The limits are inclusive: a file at both limits imports unchanged."""
+    path = _export_all(source, tmp_path)
+    lines = _decompressed_lines(path)
+    longest = max(len(line) - 1 for line in lines)  # characters before the newline
+    total = sum(len(line) for line in lines)
+    summary = export_import.import_file(target, path, max_line_chars=longest, max_total_chars=total)
+    assert summary.messages_inserted == 6
+    assert _messages_by_key(target) == _messages_by_key(source)
+
+
+def test_import_rejects_a_line_over_the_line_limit(source, target, tmp_path):
+    path = _export_all(source, tmp_path)
+    longest = max(len(line) - 1 for line in _decompressed_lines(path))
+    before = _counts(target)
+    with pytest.raises(export_import.ExportImportError, match="longer than"):
+        export_import.import_file(target, path, max_line_chars=longest - 1)
+    assert _counts(target) == before
+
+
+def test_import_rejects_a_file_over_the_total_limit(source, target, tmp_path):
+    path = _export_all(source, tmp_path)
+    total = sum(len(line) for line in _decompressed_lines(path))
+    before = _counts(target)
+    with pytest.raises(export_import.ExportImportError, match="decompressed characters"):
+        export_import.import_file(target, path, max_total_chars=total - 1)
+    assert _counts(target) == before
+
+
+def test_a_zstd_bomb_line_is_never_held_in_memory(source, target, tmp_path):
+    """A huge newline-free line is rejected after reading only the cap's worth."""
+    header = _valid_records(source, tmp_path)[0]
+    bomb = tmp_path / "bomb.jsonl.zst"
+    line_chars = 32 * 1024 * 1024
+    with codec.open_write_text(bomb, compress=True) as fh:
+        fh.write(json.dumps(header) + "\n")
+        chunk = "a" * (1024 * 1024)
+        for _ in range(line_chars // len(chunk)):
+            fh.write(chunk)
+    assert bomb.stat().st_size < 64 * 1024  # small on disk, large decompressed
+
+    cap = 256 * 1024
+    gc.collect()
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        with pytest.raises(export_import.ExportImportError, match="longer than"):
+            export_import.import_file(target, bomb, max_line_chars=cap)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak - baseline < 8 * 1024 * 1024
+    assert _counts(target) == dict.fromkeys(_DATA_TABLES, 0)
+
+
+def test_import_rejects_deeply_nested_json_as_an_export_error(target, tmp_path):
+    nested = tmp_path / "nested.jsonl"
+    nested.write_text("[" * 200_000 + "]" * 200_000 + "\n", encoding="utf-8")
+    err = _assert_import_of_path_fails_and_rolls_back(target, nested)
+    assert "nested too deeply" in str(err)
+
+
+def test_import_rejects_an_oversized_integer_as_an_export_error(target, tmp_path):
+    huge = tmp_path / "huge-int.jsonl"
+    huge.write_text('{"type": "header", "format_version": ' + "9" * 10_000 + "}\n")
+    _assert_import_of_path_fails_and_rolls_back(target, huge)
+
+
+@pytest.mark.parametrize(
+    "folder",
+    [
+        'Shared Folders/x" \r\nA1 DELETE "INBOX',
+        "Shared Folders/x\nA1 LOGOUT",
+        "Shared Folders/x\r",
+        "Shared Folders/x\x00",
+        "",
+        None,
+        ["Shared Folders/x"],
+    ],
+    ids=["crlf", "lf", "cr", "nul", "empty", "null", "array"],
+)
+def test_import_rejects_a_list_folder_imap_cannot_carry(source, target, tmp_path, folder):
+    records = _valid_records(source, tmp_path)
+    for record in records:
+        if record.get("folder") == ANNOUNCE:
+            record["folder"] = folder
+    bad = tmp_path / "bad-folder.jsonl"
+    _write_records(bad, records)
+    err = _assert_import_of_path_fails_and_rolls_back(target, bad)
+    assert "list folder" in str(err)
+
+
+@pytest.mark.parametrize(
+    "folder",
+    ["Shared Folders/itu+ietf", "Shared Folders/some-list.name_2", 'Shared Folders/a"b\\'],
+    ids=["plus", "dot-dash-underscore", "quote-backslash"],
+)
+def test_import_accepts_folders_quote_folder_can_carry(source, target, tmp_path, folder):
+    records = _valid_records(source, tmp_path)
+    for record in records:
+        if record.get("folder") == ANNOUNCE:
+            record["folder"] = folder
+    path = tmp_path / "ok.jsonl"
+    _write_records(path, records)
+    export_import.import_file(target, path)
+    folders = {row["folder"] for row in target.conn.execute("SELECT folder FROM lists")}
+    assert folders == {folder, LAST_CALL}
+
+
+# ==============================================================================
 # CLI
 # ==============================================================================
 

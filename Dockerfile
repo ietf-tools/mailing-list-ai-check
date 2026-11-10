@@ -111,9 +111,16 @@ RUN pip install --no-deps -e . && chmod 0755 /usr/local/bin/mlac-web
 # Defaults for a container: the database on the mounted volume, and a bind
 # address reachable from outside the container. Every one of these is an
 # ordinary environment variable, so a Deployment overrides it without a rebuild.
+#
+# PUBLIC_READONLY=1 is the image default because the bind address above is
+# reachable from the network and the app has no authentication: a container
+# started with no configuration refuses every state-changing request. Set
+# PUBLIC_READONLY=0 to enable pull/extract/score, import and edits from the
+# dashboard. The pipeline commands (mail-ai-pull and the rest) are unaffected.
 ENV DATABASE_PATH=/data/mail.db \
     FLASK_HOST=0.0.0.0 \
-    FLASK_PORT=8050
+    FLASK_PORT=8050 \
+    PUBLIC_READONLY=1
 
 USER mlac
 EXPOSE 8050

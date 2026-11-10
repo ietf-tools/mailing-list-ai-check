@@ -88,6 +88,34 @@ log = logging.getLogger("mailing_list_ai_check.export_import")
 FORMAT_NAME = "mlac-export"
 FORMAT_VERSION = 2
 
+#: Longest line, in characters, :func:`import_file` accepts. One line is one
+#: record, and the largest record is a message carrying its raw body, raw HTML,
+#: base64 raw headers and an embedded extraction and score. Measured on a
+#: 174,029-message store (2026-11-11), the largest values were: raw body 328,040
+#: characters, raw HTML 1,417,233, raw headers 24,672 bytes (about 33,000 in
+#: base64), a score's raw response 550,794. Their sum, about 2.3 million
+#: characters, bounds a real record before JSON escaping, which at most doubles
+#: it for this content (``ensure_ascii=False``, so only quotes, backslashes and
+#: control characters expand). 64 Mi characters leaves more than ten times that
+#: headroom while keeping one line's memory bounded. The limit is enforced while
+#: reading, so a longer line is never held in memory.
+MAX_LINE_CHARS = 64 * 1024 * 1024
+
+#: Total decompressed characters :func:`import_file` reads from one file before
+#: it stops. The full export of the same 174,029-message store is about 220 MB
+#: zstd-compressed and about 3.7 G characters decompressed; 64 Gi characters is
+#: about seventeen times that. The cap bounds the work and the transaction size
+#: a small compressed file can demand (a decompression bomb) at a fixed figure,
+#: independent of the compression ratio, which varies with the share of HTML and
+#: so gives no tight bound of its own. Every line is also parsed and validated
+#: as it is read, so a stream of invalid records stops at its first line.
+MAX_TOTAL_CHARS = 64 * 1024 * 1024 * 1024
+
+#: Characters an IMAP mailbox name cannot carry in the quoted form
+#: :func:`~.imap_client.quote_folder` sends (CR, LF and NUL). A ``list`` record
+#: whose ``folder`` holds one is rejected, since no pull could open it.
+_FOLDER_FORBIDDEN = frozenset("\r\n\x00")
+
 #: Record ``type`` values in their fixed file order, mapped to a monotonic rank.
 #: The importer requires records to appear in non-decreasing rank (``header``
 #: first, ``trailer`` last), which guarantees every cross-reference is a
@@ -731,7 +759,13 @@ class _Importer:
 
     def _handle_list(self, record: dict[str, Any], lineno: int) -> None:
         self.file_lists += 1
-        folder = record["folder"]
+        folder = record.get("folder")
+        if not isinstance(folder, str) or not folder:
+            raise ExportImportError(f"line {lineno}: list folder must be a non-empty string")
+        if _FOLDER_FORBIDDEN.intersection(folder):
+            # The stored folder is later sent to the IMAP server by the ranged
+            # pull and preview; CR, LF or NUL cannot be quoted there.
+            raise ExportImportError(f"line {lineno}: list folder {folder!r} contains CR, LF or NUL")
         existing = self.conn.execute("SELECT id FROM lists WHERE folder = ?", (folder,)).fetchone()
         if existing is not None:
             # An existing row is authoritative; its metadata is not overwritten.
@@ -1175,6 +1209,8 @@ def import_file(
     in_path: str | Path,
     *,
     dry_run: bool = False,
+    max_line_chars: int = MAX_LINE_CHARS,
+    max_total_chars: int = MAX_TOTAL_CHARS,
 ) -> ImportSummary:
     """Import an export file into ``store`` as one all-or-nothing transaction.
 
@@ -1198,6 +1234,14 @@ def import_file(
     its returned :class:`ImportSummary` (with ``dry_run=True``) is exact. Any
     validation failure raises :class:`ExportImportError`; a missing file still
     raises :class:`FileNotFoundError`.
+
+    Two limits bound what a file can demand, each raising
+    :class:`ExportImportError` and rolling back: a line longer than
+    ``max_line_chars`` characters (default :data:`MAX_LINE_CHARS`), detected
+    while reading so the line is never held whole, and more than
+    ``max_total_chars`` decompressed characters in all (default
+    :data:`MAX_TOTAL_CHARS`). A line whose JSON nests too deeply to parse is
+    reported the same way.
     """
     conn = store.conn
     importer = _Importer(store)
@@ -1206,13 +1250,37 @@ def import_file(
     try:
         try:
             with open_read_text(in_path) as fh:
-                for lineno, line in enumerate(fh, 1):
+                total_chars = 0
+                lineno = 0
+                while True:
+                    # One character over the cap distinguishes a line of exactly
+                    # max_line_chars (plus its newline) from a longer one, and
+                    # readline stops there instead of reading the whole line.
+                    line = fh.readline(max_line_chars + 1)
+                    if not line:
+                        break
+                    lineno += 1
+                    if len(line) > max_line_chars and not line.endswith("\n"):
+                        raise ExportImportError(
+                            f"line {lineno}: longer than {max_line_chars} characters"
+                        )
+                    total_chars += len(line)
+                    if total_chars > max_total_chars:
+                        raise ExportImportError(
+                            f"line {lineno}: file exceeds {max_total_chars} decompressed characters"
+                        )
                     stripped = line.strip()
                     if not stripped:
                         continue
                     try:
                         record = json.loads(stripped)
-                    except json.JSONDecodeError as exc:
+                    except RecursionError as exc:
+                        raise ExportImportError(
+                            f"line {lineno}: invalid JSON: nested too deeply"
+                        ) from exc
+                    except ValueError as exc:
+                        # JSONDecodeError, and also the ValueError json raises for
+                        # an integer longer than sys.get_int_max_str_digits().
                         raise ExportImportError(f"line {lineno}: invalid JSON: {exc}") from exc
                     importer.handle(record, lineno)
         except CodecError as exc:

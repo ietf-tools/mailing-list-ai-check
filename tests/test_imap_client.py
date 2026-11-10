@@ -12,6 +12,8 @@ from mailing_list_ai_check.imap_client import (
     ImapClient,
     build_search_criteria,
     quote_folder,
+    quote_imap_string,
+    unquote_imap_string,
 )
 
 
@@ -20,6 +22,50 @@ from mailing_list_ai_check.imap_client import (
 
 def test_quote_folder_wraps_in_quotes():
     assert quote_folder("Shared Folders/last-call") == '"Shared Folders/last-call"'
+
+
+def test_quote_folder_leaves_real_folder_names_unchanged():
+    # Every character class seen in real folder names (letters, digits, ".",
+    # "-", "_", "+", space and "/") passes through unescaped.
+    for name in ("Shared Folders/itu+ietf", "Shared Folders/some-list.name_2"):
+        assert quote_folder(name) == f'"{name}"'
+
+
+def test_quote_folder_escapes_backslash_before_quote():
+    # A trailing backslash must not escape the closing quote, and an embedded
+    # quote must not end the string early.
+    assert quote_folder("evil\\") == '"evil\\\\"'
+    assert quote_folder('a"b') == '"a\\"b"'
+    assert quote_folder('a\\"b') == '"a\\\\\\"b"'
+
+
+@pytest.mark.parametrize("bad", ["x\r\nA1 DELETE INBOX", "x\nA1 LOGOUT", "x\rA", "x\x00"])
+def test_quote_folder_rejects_cr_lf_nul(bad):
+    with pytest.raises(ValueError):
+        quote_folder(bad)
+
+
+def test_examine_refuses_injected_folder_before_any_command():
+    conn = FakeImapConn(folders={})
+    client = ImapClient(conn)
+    with pytest.raises(ValueError):
+        client.examine('Shared Folders/x" \r\nA2 DELETE "INBOX')
+    assert conn.selected is None
+
+
+def test_unquote_imap_string_reverses_quote():
+    for value in ("plain", 'a"b', "trail\\", 'mix\\"ed'):
+        assert unquote_imap_string(quote_imap_string(value)[1:-1]) == value
+
+
+def test_build_search_criteria_escapes_from_addr():
+    crit = build_search_criteria(from_addr='Jane "JD" Doe\\')
+    assert crit == ["FROM", '"Jane \\"JD\\" Doe\\\\"']
+
+
+def test_build_search_criteria_rejects_crlf_in_from_addr():
+    with pytest.raises(ValueError):
+        build_search_criteria(from_addr="a@example.org\r\nA9 LOGOUT")
 
 
 def test_build_search_criteria_defaults_to_all():
@@ -40,6 +86,13 @@ def test_build_search_criteria_sent_since_follows_since():
     assert crit == ["SINCE", "01-May-2026", "SENTSINCE", "30-Apr-2026"]
 
 
+def test_build_search_criteria_sent_before_follows_sent_since():
+    crit = build_search_criteria(
+        since="01-Jul-2024", sent_since="30-Jun-2024", sent_before="02-Aug-2024"
+    )
+    assert crit == ["SINCE", "01-Jul-2024", "SENTSINCE", "30-Jun-2024", "SENTBEFORE", "02-Aug-2024"]
+
+
 # --- folder listing -----------------------------------------------------------
 
 
@@ -58,6 +111,14 @@ def test_list_folders_handles_unquoted_names():
     lines = [rb'(\HasNoChildren) "/" Shared_Folders_quic']
     client = ImapClient(FakeImapConn(list_lines=lines))
     assert client.list_folders() == ["Shared_Folders_quic"]
+
+
+def test_list_folders_unescapes_quoted_names():
+    lines = [rb'(\HasNoChildren) "/" "Shared Folders/a\"b\\c"']
+    client = ImapClient(FakeImapConn(list_lines=lines))
+    folders = client.list_folders()
+    assert folders == ['Shared Folders/a"b\\c']
+    assert quote_folder(folders[0]) == '"Shared Folders/a\\"b\\\\c"'
 
 
 # --- examine ------------------------------------------------------------------

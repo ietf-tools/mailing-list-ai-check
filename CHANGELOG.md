@@ -37,6 +37,42 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.16.3] - 2026-11-11
+
+Summary: The lists pane shows its "last synced" stamp in UTC, `mail-ai-pull` gains a `--until` end date for bounded historical pulls, and the web app, importer, stats export and IMAP client are hardened against unauthorised access, resource exhaustion and unintended data exposure.
+
+- Show the "last synced" stamp in the lists pane in UTC instead of the browser's local time, with a "UTC" suffix on the list card.
+- Add a "Last synced (UTC)" tooltip to the Synced column heading in the lists index.
+- State in the README dashboard section that all dashboard dates are shown in UTC.
+- Add a `--until YYYY-MM-DD` option to `mail-ai-pull` that ends a `--since` period before the given date, via a server-side `SENTBEFORE` search and a client-side discard counted as `discarded_late`.
+- Leave a list's incremental cursor unwritten after a `--until`-bounded pull, since that period omits every message after it.
+- Add a Host-header allow-list (`ALLOWED_HOSTS`) that refuses a request naming an unlisted host with a 400; an instance bound to a loopback address defaults to the loopback names.
+- Refuse a state-changing request whose `Origin` names another site, or whose `Sec-Fetch-Site` is `cross-site`, with a 403.
+- Limit request bodies to 1 MiB on every endpoint except `POST /api/import`, refuse chunked bodies on those endpoints, and answer with a JSON 413.
+- Limit `POST /api/import` uploads to `MAX_UPLOAD_MB` MiB (default 1024).
+- Set `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy` and a Content-Security-Policy on every response.
+- Serve the dashboard's `index.html` for any path that resolves outside `frontend/dist`, including through a symlink, so a response no longer reveals whether a file exists on the server.
+- Refuse to start `mail-ai-web --debug` on a non-loopback bind host.
+- Set `PUBLIC_READONLY=1` as the default in the production container image; `PUBLIC_READONLY=0` enables dashboard writes there.
+- Reject integer query parameters outside the signed 64-bit range with a 400, and cap `page` at 10,000,000.
+- Return a JSON 404 for a message or person id in a URL that exceeds the signed 64-bit range.
+- Reject out-of-range ids in the JSON id lists of the person, staleness and retest endpoints with a 400.
+- Reject NaN and infinite values for `cpm_min`, `cpm_max`, `min_likelihood` and `max_likelihood` with a 400.
+- Cap free-text query parameters (`q` 200, `address` 320, `label` 64, `list` 255 characters) with a 400.
+- Allow one build-and-stream at a time per server process for each of `GET /api/export` and `GET /api/export/stats`, answering a JSON 429 with `Retry-After` while busy.
+- Take over an export slot held for longer than 1800 seconds.
+- Reject an unknown list name in an export request with a 404 before any temporary file is created.
+- Return a fixed message for IMAP failures from the API and write the exception detail to the server log.
+- Replace the server's temporary file path in import error messages with "the uploaded file".
+- Remove the stored Pangram `raw_response` from the `GET /api/messages/<id>` response.
+- Limit each line of an import file to 64 Mi characters, enforced while reading, and each file to 64 Gi decompressed characters.
+- Report import JSON that nests too deeply, or holds an integer too long to convert, as an import error.
+- Reject an imported list record whose folder is missing, is not a string, or contains CR, LF or NUL.
+- Prefix `'` to every stats-export CSV text field that begins with `=`, `+`, `-`, `@`, a tab or a carriage return, and state the rule and its reversal in the archive README and `docs/stats-export.md`.
+- Escape backslash as well as double quote in IMAP mailbox names and `FROM` search terms, and refuse a value containing CR, LF or NUL before any command is sent.
+- Remove quoted-string escapes from folder names read from the IMAP `LIST` response.
+- Document the request-hardening checks, the new settings and the scope of `ALLOW_EXPORT` in `docs/deployment.md` and `.env.example`.
+
 ## [1.16.2] - 2026-11-06
 
 Summary: The Senders pane omits shared addresses that carry many people's mail, starting with noreply@ietf.org.

@@ -116,6 +116,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--until",
+        metavar="YYYY-MM-DD",
+        help=(
+            "with --since, end the period before this date (exclusive): the server "
+            "search adds SENTBEFORE and a fetched message dated on or after it is "
+            "discarded; such a pull never writes a list's incremental cursor"
+        ),
+    )
+    parser.add_argument(
         "--from",
         dest="from_filters",
         action="append",
@@ -164,7 +173,7 @@ def _resolve_depth(args: argparse.Namespace) -> DepthMode:
         # a cursor there, and leave named lists free to take a full first pull.
         return DepthMode(incremental=True, require_cursor=args.all_lists)
     if args.since is not None:
-        return DepthMode(since=args.since)
+        return DepthMode(since=args.since, until=args.until)
     if args.days is not None:
         from datetime import UTC, datetime, timedelta
 
@@ -191,7 +200,7 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
     # pull, so neither takes a depth mode (and both reject one, to avoid confusion).
     if args.backfill_html or args.backfill_headers:
         flag = "--backfill-html" if args.backfill_html else "--backfill-headers"
-        if sum(depth_flags) > 0:
+        if sum(depth_flags) > 0 or args.until is not None:
             parser.error(f"{flag} does not take a depth mode (--count/--since/…)")
         if args.limit is not None and args.limit <= 0:
             parser.error("--limit must be a positive integer")
@@ -210,6 +219,17 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
             datetime.strptime(args.since, "%Y-%m-%d")
         except ValueError:
             parser.error("--since must be an ISO date (YYYY-MM-DD)")
+    if args.until is not None:
+        from datetime import datetime
+
+        if args.since is None:
+            parser.error("--until requires --since")
+        try:
+            datetime.strptime(args.until, "%Y-%m-%d")
+        except ValueError:
+            parser.error("--until must be an ISO date (YYYY-MM-DD)")
+        if args.until <= args.since:
+            parser.error("--until must be later than --since")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be a positive integer")
 

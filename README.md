@@ -151,6 +151,13 @@ Depth is one of `--count N`, `--since YYYY-MM-DD`, `--days N`, or
 `--incremental`. `--limit N` is a hard cap on messages fetched this run — use
 `--limit 10` when testing (see Costs and usage limits).
 
+`--until YYYY-MM-DD` ends a `--since` period before the given date (exclusive).
+The server search adds `SENTBEFORE`, a fetched message dated on or after the
+date is discarded, and the pull never writes a list's incremental cursor, since
+the period omits everything after it. Combined with `--db` and `--from`, it
+pulls a bounded historical sample into a separate database, for example
+`mail-ai-pull tls --since 2024-07-01 --until 2024-08-01 --from a@example.org --db sample.db`.
+
 `--incremental` resumes each list from its stored cursor, which records the
 UIDVALIDITY and the highest UID stored for that list. It is the cheaper and more
 exact way to catch up: the search is a bounded `UID last+1:*`, no already-stored
@@ -238,6 +245,9 @@ mail-ai-web    # serves the built dashboard + API at http://127.0.0.1:8050
 For a production view, build the front end (`make build`) first; `mail-ai-web`
 then serves `frontend/dist` directly. For front-end development, use the
 two-terminal workflow (see `make dev`).
+
+All dates and times on the dashboard are shown in UTC, including the "last
+synced" stamp in the lists pane.
 
 One filter — list, sender (person or address), date range, subject/text search,
 Pangram label, AI-score range and reply rate — drives all three panes at once,

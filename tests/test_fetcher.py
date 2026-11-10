@@ -841,6 +841,48 @@ def test_since_pull_prefilters_on_sent_date_server_side():
     store.close()
 
 
+def test_until_pull_bounds_the_period_server_side_and_discards_late_mail():
+    # uid 1 is in July; uid 2 is sent 2 Aug (excluded server-side by
+    # SENTBEFORE); uid 3 is sent 1 Aug 00:30 +0000, which passes the one-day
+    # SENTBEFORE margin but is discarded client-side as on/after --until.
+    fd = FakeFolder(uidvalidity=1000, uidnext=10, exists=3)
+    fd.messages[1] = make_raw(message_id="<jul@x>", date="Mon, 15 Jul 2024 10:00:00 +0000")
+    fd.messages[2] = make_raw(message_id="<aug@x>", date="Fri, 02 Aug 2024 10:00:00 +0000")
+    fd.messages[3] = make_raw(message_id="<edge@x>", date="Thu, 01 Aug 2024 00:30:00 +0000")
+    fd.dates = {1: datetime(2024, 7, 15), 2: datetime(2024, 8, 2), 3: datetime(2024, 8, 1)}
+    fd.sent_dates = dict(fd.dates)
+    fd.froms = {1: "a@example.org", 2: "a@example.org", 3: "a@example.org"}
+    conn = FakeImapConn(folders={"Shared Folders/t": fd})
+    client = ImapClient(conn)
+    store = Store(":memory:")
+    depth = DepthMode(since="2024-07-01", until="2024-08-01")
+    summary = run_fetch(client, store, _request(depth=depth))
+    assert conn.search_calls == [
+        ("SINCE", "01-Jul-2024", "SENTSINCE", "30-Jun-2024", "SENTBEFORE", "02-Aug-2024")
+    ]
+    assert summary.matched == 2
+    assert summary.fetched == 1
+    assert summary.discarded_late == 1
+    assert "discarded_late=1" in summary.as_line()
+    rows = store.conn.execute("SELECT message_id FROM messages").fetchall()
+    assert [r["message_id"] for r in rows] == ["<jul@x>"]
+    store.close()
+
+
+def test_until_pull_never_writes_a_cursor_for_an_untracked_list():
+    # An unfiltered first --since pull adopts its period as the list's scope;
+    # with --until the period omits everything after it, so no cursor is written.
+    fd = _folder({u: (datetime(2024, 7, u), f"u{u}@example.org") for u in range(1, 4)})
+    client = ImapClient(FakeImapConn(folders={"Shared Folders/t": fd}))
+    store = Store(":memory:")
+    depth = DepthMode(since="2024-07-01", until="2024-08-01")
+    summary = run_fetch(client, store, _request(depth=depth))
+    assert summary.fetched == 3
+    mlist = store.upsert_list("t", "Shared Folders/t")
+    assert store.get_pull_state(mlist.id) is None
+    store.close()
+
+
 def test_run_fetch_repull_skips_stored_bodies():
     # A second identical pull downloads nothing: the stored UIDs are
     # subtracted from the search result (UIDVALIDITY unchanged), counted as

@@ -57,6 +57,8 @@ class DepthMode:
 
     - ``count``: the most recent N messages (UID slice from the top).
     - ``since``: server-side ``SINCE`` from an ISO ``YYYY-MM-DD`` date.
+      ``until`` (ISO, exclusive) optionally bounds that period's end; it is
+      meaningful only with ``since``.
     - ``incremental``: resume from the stored ``pull_state`` cursor.
 
     ``require_cursor`` refines ``incremental``: a folder with no cursor is
@@ -68,6 +70,7 @@ class DepthMode:
 
     count: int | None = None
     since: str | None = None
+    until: str | None = None
     incremental: bool = False
     require_cursor: bool = False
 
@@ -101,6 +104,9 @@ class FetchSummary:
     matched: int = 0
     auto_generated: int = 0
     discarded_early: int = 0
+    #: Messages a ``--until``-bounded pull fetched whose own ``Date`` header is
+    #: on or after the period's end, discarded instead of stored.
+    discarded_late: int = 0
     #: Folders an ``--all-lists --incremental`` run skipped for want of a
     #: cursor (see :func:`run_fetch`). Nothing was fetched or examined for them.
     untracked_skipped: int = 0
@@ -115,6 +121,7 @@ class FetchSummary:
             f"parse_errors={self.parse_errors} html_only={self.html_only} "
             f"matched={self.matched} auto_generated={self.auto_generated} "
             f"discarded_early={self.discarded_early} "
+            f"discarded_late={self.discarded_late} "
             f"untracked_skipped={self.untracked_skipped} "
             f"cursors_seeded={self.cursors_seeded}"
         )
@@ -413,6 +420,7 @@ def _union_search(
     uid_range: str | None,
     from_filters: Sequence[str],
     sent_since: str | None = None,
+    sent_before: str | None = None,
 ) -> list[int]:
     """Run one search per ``FROM`` filter and return the deduped, sorted union.
 
@@ -421,12 +429,18 @@ def _union_search(
     """
     if not from_filters:
         return client.uid_search(
-            build_search_criteria(since=since, sent_since=sent_since, uid_range=uid_range)
+            build_search_criteria(
+                since=since, sent_since=sent_since, sent_before=sent_before, uid_range=uid_range
+            )
         )
     seen: set[int] = set()
     for term in from_filters:
         criteria = build_search_criteria(
-            since=since, sent_since=sent_since, uid_range=uid_range, from_addr=term
+            since=since,
+            sent_since=sent_since,
+            sent_before=sent_before,
+            uid_range=uid_range,
+            from_addr=term,
         )
         seen.update(client.uid_search(criteria))
     return sorted(seen)
@@ -488,8 +502,22 @@ def compute_uids(
         # the precise gate.
         margin = datetime.strptime(depth.since, "%Y-%m-%d") - timedelta(days=1)
         sent_since = iso_to_imap_date(margin.date().isoformat())
+        # --until bounds the period's end on the Date header only (SENTBEFORE,
+        # exclusive). INTERNALDATE is left unbounded above, since mail sent in
+        # the period can arrive in the folder later. One day of margin for the
+        # same time-zone reason as SENTSINCE; the client-side discard in
+        # _fetch_folder is the precise gate.
+        sent_before = None
+        if depth.until is not None:
+            end = datetime.strptime(depth.until, "%Y-%m-%d") + timedelta(days=1)
+            sent_before = iso_to_imap_date(end.date().isoformat())
         uids = _union_search(
-            client, since=since, uid_range=None, from_filters=from_filters, sent_since=sent_since
+            client,
+            since=since,
+            uid_range=None,
+            from_filters=from_filters,
+            sent_since=sent_since,
+            sent_before=sent_before,
         )
         return uids, status
 
@@ -608,6 +636,7 @@ def run_fetch(client: ImapClient, store: Store, request: FetchRequest) -> FetchS
             request.batch_size,
             summary,
             min_date=request.depth.since,
+            max_date=request.depth.until,
         )
         summary.per_list[name] = list_count
 
@@ -630,8 +659,12 @@ def run_fetch(client: ImapClient, store: Store, request: FetchRequest) -> FetchS
         # cursor alone; the next unfiltered --incremental run re-searches the
         # span above it, skips what is stored as duplicates, and fetches what
         # the filtered run passed by.
-        may_write_cursor = not request.from_filters and (
-            request.depth.incremental or cursor is None
+        # A --until-bounded pull omits everything after its period, so it can
+        # never claim completeness through its last UID either.
+        may_write_cursor = (
+            not request.from_filters
+            and request.depth.until is None
+            and (request.depth.incremental or cursor is None)
         )
         processed = stored_matched.union(uids)
         last_processed = None
@@ -687,6 +720,7 @@ def _fetch_folder(
     summary: FetchSummary,
     *,
     min_date: str | None = None,
+    max_date: str | None = None,
 ) -> int:
     """Fetch, parse and upsert ``uids`` from ``folder``. Returns rows fetched.
 
@@ -695,6 +729,9 @@ def _fetch_folder(
     :func:`run_fetch`). ``None`` disables the check. The comparison is
     lexicographic — a stored date is a full UTC ISO-8601 timestamp, so any
     timestamp on ``min_date``'s own day sorts after the bare date and is kept.
+    ``max_date`` is the exclusive end of the period: a parsed message dated on or
+    after it is discarded (any timestamp on ``max_date``'s day sorts after the
+    bare date, so that whole day is excluded). ``None`` disables the check.
     """
     name = list_name_for_folder(folder)
     fetched_here = 0
@@ -709,6 +746,10 @@ def _fetch_folder(
         if min_date is not None and parsed.date is not None and parsed.date < min_date:
             summary.discarded_early += 1
             log.debug("discarding %s uid=%s dated %s (before %s)", name, uid, parsed.date, min_date)
+            continue
+        if max_date is not None and parsed.date is not None and parsed.date >= max_date:
+            summary.discarded_late += 1
+            log.debug("discarding %s uid=%s dated %s (from %s)", name, uid, parsed.date, max_date)
             continue
 
         address_id: int | None = None

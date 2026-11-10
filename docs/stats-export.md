@@ -55,6 +55,15 @@ CSV conventions: a NULL is an empty field; booleans are `true`/`false`;
 dates are the stored UTC ISO-8601 strings; fractions are written at full
 stored precision, unrounded. Column order is part of the format.
 
+Formula escaping: a text field that begins with `=`, `+`, `-`, `@`, a tab or a
+carriage return, optionally after one or more `'` characters, is written with
+one `'` prepended, so that a spreadsheet does not evaluate it as a formula.
+Most text values come from mail headers written by the senders. The rule
+applies to every text field of every CSV, email addresses included, so the
+`email` and `folder` joins still match; numeric fields are never altered. The
+stored value is recovered by removing the first character of each field that
+matches `^'+[=+\-@\t\r]`. Values in `datapackage.json` are not altered.
+
 Zip rather than zstd because the audience is analysis tools, not this app:
 every OS opens a zip, and the archive bundles the data dictionary with the
 data. Without message text the rows are small (roughly 200 bytes each), so

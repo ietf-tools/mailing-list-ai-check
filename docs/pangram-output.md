@@ -212,7 +212,8 @@ lines are a subsequence of the extracted ones; `_window_details` walks the two
 in order to convert them, and reports `null` positions for a window it cannot
 locate (a message re-extracted after it was scored). Leading and trailing
 whitespace is trimmed off each window first, so a position marks its first real
-character. The complete `raw_response` is still returned alongside.
+character. The stored `raw_response` is not returned by the detail API; it is
+available through the full export.
 
 Dashboard use:
 

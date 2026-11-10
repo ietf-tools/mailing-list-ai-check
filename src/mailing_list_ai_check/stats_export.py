@@ -43,6 +43,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import zipfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -352,16 +353,52 @@ def zip_path(path: str | Path) -> Path:
     return p.with_name(p.name + ZIP_SUFFIX)
 
 
+#: Text fields a spreadsheet may evaluate as a formula: a leading ``=``, ``+``,
+#: ``-``, ``@``, tab or carriage return (the OWASP CSV-injection trigger set),
+#: here optionally preceded by ``'`` characters. Most of these values come from
+#: mail headers (``From`` names, addresses, Message-IDs) or from an imported
+#: export file, so their content is chosen by whoever wrote the mail.
+#:
+#: Including the leading-quote prefix makes the transformation exactly
+#: reversible: every escaped field matches ``^'+`` followed by a trigger
+#: character, and no unescaped field does, so removing one ``'`` from each
+#: field that matches recovers the stored value. A value that merely begins
+#: with ``'`` (some ``From`` names are written ``'Name'``) is not altered.
+_FORMULA_TRIGGER = re.compile(r"'*[=+\-@\t\r]")
+
+#: The character prepended to a field matching :data:`_FORMULA_TRIGGER`. A
+#: spreadsheet reads a leading ``'`` as "treat as text" and does not evaluate it.
+_FORMULA_ESCAPE = "'"
+
+
+def _neutralise_formula(value: str) -> str:
+    """Prefix ``value`` with :data:`_FORMULA_ESCAPE` when it matches :data:`_FORMULA_TRIGGER`.
+
+    Applied to every text field of every CSV member, so both sides of a join
+    (``messages.csv`` ``email`` to ``senders.csv``, ``folder`` to ``lists.csv``)
+    receive the same transformation and the keys still match. An email address
+    that begins with ``+`` or ``-`` (valid in RFC 5322) is escaped like any other
+    text, because a spreadsheet evaluates it the same way.
+    """
+    if _FORMULA_TRIGGER.match(value):
+        return _FORMULA_ESCAPE + value
+    return value
+
+
 def _cell(value: Any) -> Any:
     """One CSV field: NULL as an empty field, a boolean as ``true`` / ``false``.
 
-    Everything else is handed to :mod:`csv` unchanged, which renders a float at
-    full stored precision (``repr``) rather than rounding it.
+    A text value is passed through :func:`_neutralise_formula`. Numbers are
+    handed to :mod:`csv` unchanged, which renders a float at full stored
+    precision (``repr``) rather than rounding it; a negative number is a number,
+    not text, and is never escaped.
     """
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, str):
+        return _neutralise_formula(value)
     return value
 
 
@@ -799,6 +836,16 @@ it; this is an analysis artifact.
 The CSV files are UTF-8, RFC 4180, with a header row and `\\n` line endings. A
 NULL is an empty field, booleans are `true` / `false`, dates are the stored UTC
 ISO-8601 strings, and fractions are written at full stored precision, unrounded.
+
+A text field that begins with `=`, `+`, `-`, `@`, a tab or a carriage return,
+optionally after one or more `'` characters, is written with one `'` prepended,
+so that a spreadsheet does not evaluate it as a formula. Most text values come
+from mail headers written by the senders. The rule applies to every text field
+of every CSV member, email addresses included, so the `email` and `folder` joins
+still match; numeric fields are never altered. To recover the stored value,
+remove the first character of each field that matches the regular expression
+`^'+[=+\\-@\\t\\r]`; no other field is altered. Values in `{DATAPACKAGE_MEMBER}`
+are not altered.
 
 Rows are named by mail's own values: a message by its `message_id`, a sender by
 its `email`. None of the application's internal row ids appear. The export is

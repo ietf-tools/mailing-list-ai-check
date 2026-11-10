@@ -376,15 +376,16 @@ onMounted(() => {
 
 // --- small helpers ----------------------------------------------------------
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-// Compact "MMM DD HH:mm" stamp for last_synced_at (ISO), or "never".
+// Compact "MMM DD HH:mm" stamp for last_synced_at (ISO), in UTC like every
+// other date on the dashboard, or "never".
 function fmtSynced(iso) {
   if (!iso) return 'never'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return String(iso)
-  const mm = MONTHS[d.getMonth()]
-  const dd = String(d.getDate()).padStart(2, '0')
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mi = String(d.getMinutes()).padStart(2, '0')
+  const mm = MONTHS[d.getUTCMonth()]
+  const dd = String(d.getUTCDate()).padStart(2, '0')
+  const hh = String(d.getUTCHours()).padStart(2, '0')
+  const mi = String(d.getUTCMinutes()).padStart(2, '0')
   return `${mm} ${dd} ${hh}:${mi}`
 }
 
@@ -980,7 +981,10 @@ function closeList() {
         <div v-if="summaryLoading && !listCard" class="ctx-status">loading…</div>
         <div v-else-if="summaryError" class="ctx-status ctx-error">{{ summaryError }}</div>
         <template v-else-if="listCard">
-          <div class="synced-line">last synced {{ listCard.synced }}</div>
+          <div class="synced-line">
+            last synced {{ listCard.synced
+            }}{{ listCard.synced === 'never' ? '' : ' UTC' }}
+          </div>
           <div class="stats-row">
             <div class="tile">
               <div class="tile-val tile-val-sm">{{ listCard.total }}</div>
@@ -1046,7 +1050,7 @@ function closeList() {
             >Aggregate analysis{{ aiInd }}</span
           >
           <span style="text-align: right;">Earliest</span>
-          <span style="text-align: right;">Synced</span>
+          <span style="text-align: right;" title="Last synced (UTC)">Synced</span>
           <span></span>
         </div>
         <div v-if="showActiveEmpty" class="index-empty">
