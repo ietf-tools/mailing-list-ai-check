@@ -1,3 +1,3 @@
 """mailing-list-ai-check: AI-assisted checking of mailing-list mail."""
 
-__version__ = "1.16.3"
+__version__ = "1.17.0"

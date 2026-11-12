@@ -37,6 +37,12 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.17.0] - 2026-11-13
+
+Summary: Extraction generation 6 via email-reply-extractor v1.2.0, which recognises localized Outlook quote-header blocks and original-message dividers.
+
+- Upgrade email-reply-extractor to v1.2.0 (extraction generation 6: localized Outlook quote-header blocks and original-message dividers for French, German, Spanish, Italian, Portuguese and Dutch, with an inline-reply guard); stored extractions now read as stale and the dashboard offers re-derivation.
+
 ## [1.16.3] - 2026-11-11
 
 Summary: The lists pane shows its "last synced" stamp in UTC, `mail-ai-pull` gains a `--until` end date for bounded historical pulls, and the web app, importer, stats export and IMAP client are hardened against unauthorised access, resource exhaustion and unintended data exposure.
