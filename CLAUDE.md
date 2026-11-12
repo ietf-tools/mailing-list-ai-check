@@ -11,6 +11,8 @@ Guidance for Claude Code when working in this repository.
 - `src/mailing_list_ai_check/` — package source (src layout)
   - `config.py` — loads credentials/settings from environment
   - `store.py` — SQLite schema, migrations, and typed storage API
+  - `staleness.py` — detection and repair of out-of-date extractions (older
+    routine generation; parent stored after the reply)
   - `imap_client.py` / `fetcher.py` — IMAP connection and the pull pipeline
   - new-text extraction comes from the `email-reply-extractor` library
     (<https://github.com/JayDaley/email-reply-extractor>), extracted from this
@@ -81,7 +83,7 @@ them, and what depends on them.
 ## Versioning
 
 The app uses [semantic versioning](https://semver.org/); the current version is
-**1.17.0**. The single source of truth is `mailing_list_ai_check.__version__`
+**1.18.0**. The single source of truth is `mailing_list_ai_check.__version__`
 (in `__init__.py`); `pyproject.toml` reads it dynamically, so the two never
 drift.
 
@@ -143,6 +145,29 @@ Version stamps in the database:
   the text (migration 011, nullable, backfilled from `pipeline_version`). This is
   the only value the staleness check compares (see `staleness.py`); NULL reads as
   older than every generation.
+
+## Parent-arrival invalidation
+
+An extraction also depends on the thread parent's body
+(`Store.get_parent_body`), not only on the routine's generation. A reply
+extracted before its parent was stored holds text derived without parent-diff,
+and `staleness.check()` does not see that (it compares generations only).
+
+- `staleness.refresh_for_new_parents(store)` repairs it: it takes the
+  Message-IDs first stored since the last check, finds the extracted messages
+  whose parsed `In-Reply-To` names one, and passes them to
+  `staleness.reextract`. It is called at the start of `cli.run_extract` and at
+  the start of a non-dry-run `cli.run_score`.
+- Progress is the `parent_check_message_id` key in `app_settings` (the highest
+  `messages.id` checked), written after the re-derivation completes. Unset, it
+  defaults to the highest message id that has an extraction, so replies whose
+  parent arrived before that point are not revisited.
+- Replies it leaves unscored need no hand-over: an `ok` extraction with no
+  score is the scoring queue.
+- Any new code path that inserts into `messages` is covered without further
+  work, because the check reads the table. A new code path that derives
+  extraction text must resolve the parent the same way (`get_parent_body` with
+  `exclude_message_id`).
 
 ## Changelog — maintain it
 

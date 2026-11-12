@@ -39,6 +39,7 @@ from .pangram import (
     PangramError,
     generation_for_model,
 )
+from .staleness import ParentRefreshSummary, refresh_for_new_parents
 from .stats_export import export_stats
 from .store import SETTING_PANGRAM_MODEL, Store, sha256_text
 
@@ -549,12 +550,31 @@ def build_extract_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def refresh_parents(store: Store, logger: logging.Logger) -> ParentRefreshSummary:
+    """Re-derive extracted replies whose parent has arrived; log what changed.
+
+    A wrapper over :func:`staleness.refresh_for_new_parents` for the pipeline
+    stages. The summary line is logged at INFO only when at least one extracted
+    reply was rechecked, so a run that adds no parents logs nothing.
+    """
+    summary = refresh_for_new_parents(store)
+    if summary.reextract.processed:
+        logger.info("parent arrival: %s", summary.as_line())
+    return summary
+
+
 def run_extract(store: Store, limit: int | None = None) -> tuple[Counter[str], Counter[str]]:
     """Extract text for every message lacking an extraction row.
 
     Returns ``(status_counts, method_counts)``. Idempotent — a second run over an
     already-extracted store processes nothing. ``limit`` caps messages per run.
+
+    Before extracting, the stage re-derives the already-extracted replies whose
+    thread parent has been stored since the previous run
+    (:func:`refresh_parents`). That step is not subject to ``limit`` and is not
+    counted in the returned tallies, which describe new extractions only.
     """
+    refresh_parents(store, extract_log)
     status_counts: Counter[str] = Counter()
     method_counts: Counter[str] = Counter()
     processed = 0
@@ -762,7 +782,18 @@ def run_score(
     identical cleaned text is submitted once with the verdict fanned out to
     every extraction sharing it, counted as cache hits past the first. Items
     the job fails (or never reports back) are left unscored for a later run.
+
+    A run that is not a dry run first re-derives the extracted replies whose
+    thread parent has been stored since the last check (:func:`refresh_parents`),
+    so text made stale by a pull is never sent; a reply whose score that deletes
+    joins this run's queue.
     """
+    # A reply whose parent arrived after it was extracted must be re-derived
+    # before its text is sent; the extract stage normally has done this, and
+    # the repeat costs two lookups. A dry run writes nothing, so it skips it.
+    if not dry_run:
+        refresh_parents(store, score_log)
+
     summary = ScoreSummary()
     generation = generation_for_model(client.model if client is not None else DEFAULT_MODEL)
     price = _PRICE_PER_100_WORDS.get(generation, _DEFAULT_PRICE_PER_100_WORDS)

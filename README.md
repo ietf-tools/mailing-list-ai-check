@@ -205,6 +205,11 @@ library (a fragment scan plus a custom cleanup pass: normalization, attribution
 lines, indented quotes, signatures, digest over-strip guard). No credentials or
 network needed.
 
+A reply is extracted against the body of its thread parent when the parent is
+in the store. Before extracting, the command therefore re-derives the replies
+that were extracted before their parent was stored; see "Replies whose parent
+is stored later".
+
 ### `mail-ai-score` — Pangram AI detection
 
 ```bash
@@ -388,6 +393,53 @@ An extraction recorded against a *higher* number than the running routine — a
 database written by a newer version of the app, then opened by an older one — is
 not reported, so an older build never offers to replace text it cannot
 reproduce.
+
+### Replies whose parent is stored later
+
+A reply's new text is derived against the body of its thread parent, the stored
+message its `In-Reply-To` header names: lines the reply repeats from the parent
+are removed even when they carry no quote marker. A reply extracted while its
+parent was absent from the store is derived without that step. A later pull,
+backfill or import can store the parent, at which point the reply's stored text
+is no longer what the same routine would produce. The routine number does not
+change in this case, so the dashboard prompt described above does not report it.
+
+The extract stage (`mail-ai-extract`, and the extract step of a dashboard pull)
+corrects this before it extracts anything:
+
+- It finds the Message-IDs first stored since the previous check, including
+  auto-generated messages, and the already-extracted messages whose
+  `In-Reply-To` names one of them.
+- Each such reply is re-derived. An extraction whose text is unchanged is left
+  as it is. A changed extraction is rewritten in place.
+- A score is deleted only when the text sent to Pangram changed in substance.
+  When that text changed only in whitespace the score is kept. A reply left
+  without a score is in the scoring queue, so the next scoring run scores it;
+  that is one paid Pangram call unless the new text is already in the score
+  cache.
+- A Message-ID that already had a stored copy on another list is skipped, since
+  extraction reads the first stored copy. A message whose `In-Reply-To` names
+  its own Message-ID is not treated as a reply.
+
+`mail-ai-score` runs the same check before scoring (not in `--dry-run`), so a
+pull followed directly by a scoring run does not send text derived without a
+parent that has since been stored. A `--dry-run` estimate made between a pull
+and the next extract therefore does not include replies that the check will
+return to the queue.
+
+The check records the highest message id it has covered, so a run with no new
+messages does no further work. When any extracted reply was rechecked, the
+stage logs one line:
+
+```
+parent arrival: new_parents=412 replies_rechecked=37 rewritten=5 unchanged=32 scores_invalidated=4 scores_carried=1 to_rescore=4
+```
+
+A database first opened by v1.18.0 has no recorded position; the check then
+starts from the highest message id that has an extraction. Replies whose parent
+was stored before that point are not revisited. They are corrected by the
+dashboard's "Show affected messages" pass, which re-derives every stored
+extraction, when the extraction routine next changes.
 
 ### Exporting and importing lists
 

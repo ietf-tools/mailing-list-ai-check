@@ -37,6 +37,17 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.18.0] - 2026-11-13
+
+Summary: Extracted replies are re-derived when their thread parent is stored after them, so a later pull no longer leaves text that was derived without the parent.
+
+- Re-derive, at the start of the extract stage, every already-extracted message whose `In-Reply-To` names a Message-ID first stored since the previous check, rewriting only the extractions whose text changed.
+- Delete the score of a re-derived reply only when its cleaned text changed in substance, keep and re-key the score on a whitespace-only change, and leave the row untouched when nothing changed; a reply left without a score rejoins the scoring queue.
+- Run the same check at the start of a `mail-ai-score` run that is not a dry run, so a pull followed directly by scoring does not send text derived without a parent that has since been stored.
+- Record the highest message id already checked under the `parent_check_message_id` key in `app_settings`; a store with no recorded value starts from the highest message id that has an extraction.
+- Log a `parent arrival:` summary line from the extract and score stages when at least one extracted reply was rechecked.
+- Skip a Message-ID that already had a stored copy on another list, and never treat a message naming its own Message-ID as a reply.
+
 ## [1.17.0] - 2026-11-13
 
 Summary: Extraction generation 6 via email-reply-extractor v1.2.0, which recognises localized Outlook quote-header blocks and original-message dividers.

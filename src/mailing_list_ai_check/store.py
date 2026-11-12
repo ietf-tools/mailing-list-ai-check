@@ -27,7 +27,7 @@ import logging
 import re
 import sqlite3
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Container, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -109,6 +109,11 @@ SETTING_PANGRAM_MODEL = "pangram_model"
 #: "pending", "later" or "dismissed". Absent means the state has never been set
 #: and the reader resolves it from the stored scores.
 SETTING_PANGRAM_NOTICE = "pangram_upgrade_notice"
+#: ``app_settings`` key holding the highest ``messages.id`` whose arrival has
+#: been checked against already-extracted replies (see
+#: :func:`mailing_list_ai_check.staleness.refresh_for_new_parents`). Written by
+#: the pipeline, not chosen by a user.
+SETTING_PARENT_CHECK_MESSAGE_ID = "parent_check_message_id"
 
 
 # --- Schema migrations --------------------------------------------------------
@@ -1822,6 +1827,61 @@ class Store:
             "SELECT message_id FROM extractions ORDER BY message_id"
         ).fetchall()
         return [row["message_id"] for row in rows]
+
+    # -- parent arrival ---------------------------------------------------------
+
+    def max_message_pk(self) -> int:
+        """Return the highest ``messages.id`` in the store, or 0 when empty."""
+        row = self.conn.execute("SELECT COALESCE(MAX(id), 0) AS pk FROM messages").fetchone()
+        return row["pk"]
+
+    def max_extracted_message_pk(self) -> int:
+        """Return the highest ``messages.id`` that has an extraction, or 0."""
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(message_id), 0) AS pk FROM extractions"
+        ).fetchone()
+        return row["pk"]
+
+    def message_ids_first_stored_after(self, message_pk: int) -> set[str]:
+        """Return the Message-IDs whose first stored copy has an id above ``message_pk``.
+
+        These are the Message-IDs that :meth:`get_parent_body` could not resolve
+        while the store held only rows up to ``message_pk`` and can resolve now.
+        A Message-ID that already had a copy at or below ``message_pk`` (the
+        same message on another list) is left out: :meth:`get_parent_body`
+        reads the lowest-id copy, so a later copy changes nothing. Auto-generated
+        messages are included, because a reply to one resolves it as a parent
+        like any other.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT n.message_id AS message_id FROM messages n "
+            "WHERE n.id > ? AND NOT EXISTS ("
+            "SELECT 1 FROM messages o WHERE o.message_id = n.message_id AND o.id <= ?)",
+            (message_pk, message_pk),
+        ).fetchall()
+        return {row["message_id"] for row in rows}
+
+    def extracted_replies_to(self, parent_message_ids: Container[str]) -> list[int]:
+        """Return the ids of extracted messages replying to one of ``parent_message_ids``.
+
+        The ``In-Reply-To`` value is normalised in Python by
+        :func:`_parent_message_id`, the same parse :meth:`get_parent_body`
+        applies, so the linkage is identical to the one extraction uses. A
+        message naming its own Message-ID is not a reply and is never returned
+        (:meth:`get_parent_body` resolves no parent for it). Ascending id order.
+        One scan of the extracted replies: ``in_reply_to`` carries no index.
+        """
+        cursor = self.conn.execute(
+            "SELECT m.id AS id, m.message_id AS message_id, m.in_reply_to AS in_reply_to "
+            "FROM messages m JOIN extractions e ON e.message_id = m.id "
+            "WHERE m.in_reply_to IS NOT NULL AND m.in_reply_to != '' ORDER BY m.id"
+        )
+        pks: list[int] = []
+        for row in cursor:
+            parent_mid = _parent_message_id(row["in_reply_to"])
+            if parent_mid != row["message_id"] and parent_mid in parent_message_ids:
+                pks.append(row["id"])
+        return pks
 
     def extraction_version_counts(self) -> list[tuple[int | None, int]]:
         """Return ``(extraction_version, count)`` over every extraction row.

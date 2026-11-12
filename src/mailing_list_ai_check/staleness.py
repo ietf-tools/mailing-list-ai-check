@@ -36,6 +36,17 @@ substantive change makes :func:`reextract` delete the score row and report the
 message as needing a re-score. A message whose extracted text changed but whose
 cleaned text did not keeps its verdict untouched, and costs nothing.
 
+The generation is not the only thing an extraction's text depends on. A reply
+is derived against the body of its thread parent, resolved from ``In-Reply-To``
+(:meth:`~mailing_list_ai_check.store.Store.get_parent_body`), so a reply
+extracted while its parent was absent holds text the same generation would not
+produce once the parent is stored. :func:`refresh_for_new_parents` covers that
+case: it finds the messages stored since it last ran, re-derives the
+already-extracted replies to them through :func:`reextract`, and records how far
+it has checked. The generation comparison in :func:`check` does not see this
+kind of drift, which is why it is repaired as part of the pipeline rather than
+offered on the dashboard.
+
 Nothing in this module calls IMAP or Pangram: it re-runs local extraction and
 cleaning only. Re-scoring the rewritten rows is the caller's separate, paid step
 (:func:`mailing_list_ai_check.cli.run_score`).
@@ -50,7 +61,7 @@ from . import __version__
 from email_reply_extractor import clean_for_scoring
 from email_reply_extractor import EXTRACTION_VERSION, extract_new_text
 from email_reply_extractor import split_html_parts, texts_equivalent
-from .store import Extraction, Message, Store, sha256_text
+from .store import SETTING_PARENT_CHECK_MESSAGE_ID, Extraction, Message, Store, sha256_text
 
 # --- reports ------------------------------------------------------------------
 
@@ -128,6 +139,32 @@ class ReextractSummary:
     scores_invalidated: int = 0
     scores_carried: int = 0
     rescore_message_ids: list[int] = field(default_factory=list)
+
+
+@dataclass
+class ParentRefreshSummary:
+    """Tally of one :func:`refresh_for_new_parents` run.
+
+    ``new_parents`` counts the Message-IDs first stored since the previous run;
+    ``reextract`` is the :func:`reextract` tally over the already-extracted
+    replies to them (all zero when there were none).
+    """
+
+    new_parents: int = 0
+    reextract: ReextractSummary = field(default_factory=ReextractSummary)
+
+    @property
+    def rescore_message_ids(self) -> list[int]:
+        return self.reextract.rescore_message_ids
+
+    def as_line(self) -> str:
+        r = self.reextract
+        return (
+            f"new_parents={self.new_parents} replies_rechecked={r.processed} "
+            f"rewritten={r.rewritten} unchanged={r.unchanged} "
+            f"scores_invalidated={r.scores_invalidated} scores_carried={r.scores_carried} "
+            f"to_rescore={len(r.rescore_message_ids)}"
+        )
 
 
 # --- shared re-derivation -----------------------------------------------------
@@ -357,4 +394,49 @@ def reextract(store: Store, message_ids: Sequence[int]) -> ReextractSummary:
     if summary.rewritten:
         store.recompute_timing()
 
+    return summary
+
+
+def refresh_for_new_parents(store: Store) -> ParentRefreshSummary:
+    """Re-derive extracted replies whose thread parent has been stored since.
+
+    A reply extracted before its parent was in the store was derived without
+    the parent-diff step. This finds the Message-IDs first stored since the
+    previous call, selects the already-extracted messages whose ``In-Reply-To``
+    names one of them, and passes those to :func:`reextract` — which rewrites
+    only rows whose text moved, deletes a score only on a change of substance,
+    and returns the messages left needing a score. Those messages need no
+    hand-over: an ``ok`` extraction with no score is the scoring queue.
+
+    Progress is one stored number, the highest ``messages.id`` already checked
+    (``app_settings`` key :data:`~mailing_list_ai_check.store.SETTING_PARENT_CHECK_MESSAGE_ID`),
+    written after the re-derivation completes. A call with no message stored
+    since the previous one is two indexed lookups; an interrupted call is
+    repeated in full by the next one, and repeating it changes nothing. Every
+    route into ``messages`` is covered (CLI pull, dashboard pull, import)
+    because the check reads the table, not a pull's own tally.
+
+    On a store that has never been checked, the starting point is the highest
+    message id that has an extraction: messages stored after the last extracted
+    one are treated as new, and replies to parents stored before it are not
+    revisited.
+    """
+    summary = ParentRefreshSummary()
+    newest = store.max_message_pk()
+    stored = store.get_setting(SETTING_PARENT_CHECK_MESSAGE_ID)
+    checked = int(stored) if stored is not None else store.max_extracted_message_pk()
+    if newest <= checked:
+        # Nothing new. A mark above the newest id means rows were deleted; pull
+        # it back so ids reused by later inserts are not skipped.
+        if stored is None or newest < checked:
+            store.set_setting(SETTING_PARENT_CHECK_MESSAGE_ID, str(newest))
+        return summary
+
+    parents = store.message_ids_first_stored_after(checked)
+    summary.new_parents = len(parents)
+    if parents:
+        replies = store.extracted_replies_to(parents)
+        if replies:
+            summary.reextract = reextract(store, replies)
+    store.set_setting(SETTING_PARENT_CHECK_MESSAGE_ID, str(newest))
     return summary
