@@ -168,11 +168,9 @@ file is a development convenience and is absent from the image), and
 | `DATABASE_PATH` | `/data/mail.db` | SQLite file, on the persistent mount |
 | `FLASK_HOST` / `FLASK_PORT` | `0.0.0.0` / `8050` | bind address |
 | `LOG_LEVEL` | `INFO` | logging level |
-| `PUBLIC_READONLY` | `1` (on) | refuse every non-GET request with 403; set `0` to enable pull/extract/score, import and edits from the dashboard |
-| `ALLOW_EXPORT` | unset (on) | serve `GET /api/export`, the bulk download (includes message bodies) |
+| `PUBLIC_READONLY` | unset (off) | refuse every non-GET request with 403 |
+| `ALLOW_EXPORT` | unset (on) | serve `GET /api/export` (includes message bodies) |
 | `ALLOW_STATS_EXPORT` | unset (on) | serve `GET /api/export/stats` |
-| `ALLOWED_HOSTS` | unset (no check, since the image binds `0.0.0.0`) | comma-separated hostnames the `Host` header must name; `*` disables the check |
-| `MAX_UPLOAD_MB` | `1024` | largest `POST /api/import` body, in MiB; every other endpoint accepts at most 1 MiB |
 | `IMAP_HOST` / `IMAP_PORT` / `IMAP_USERNAME` / `IMAP_PASSWORD` | unset / `993` | needed only to pull mail |
 | `PANGRAM_API_KEY` | unset | needed only to score |
 | `WEB_WORKERS` / `WEB_THREADS` | `2` / `4` | gunicorn concurrency |
@@ -277,7 +275,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: web
-          image: mailing-list-ai-check:1.15.4
+          image: ghcr.io/ietf-tools/mailing-list-ai-check:1.15.3
           ports:
             - {name: http, containerPort: 8050}
           envFrom:
@@ -331,63 +329,6 @@ authentication of its own: an instance reachable beyond the cluster should run
 with `PUBLIC_READONLY=1`, and the ingress should supply access control if the
 message text is not meant to be public.
 
-The image sets `PUBLIC_READONLY=1` by default, because it binds `0.0.0.0` and a
-container started with no configuration would otherwise accept state-changing
-and paid requests from the network. An instance whose dashboard is used to pull,
-extract, score, import or edit must set `PUBLIC_READONLY=0` explicitly. The
-pipeline commands (`mail-ai-pull` and the others) do not read the setting. The
-`mail-ai-web` development server outside the image keeps its default of off.
-
-`ALLOW_EXPORT=0` disables the bulk download only. The dashboard still displays
-each message, so `GET /api/messages/<id>` continues to return that message's
-body and extracted text. Message text that must not be readable needs access
-control at the ingress.
-
-### Request hardening
-
-Every request passes these checks before it reaches an endpoint, in this order:
-
-1. **Host allow-list.** A request whose `Host` header (port ignored) is not in
-   `ALLOWED_HOSTS` is refused with a 400. This blocks DNS rebinding, in which a
-   web page re-points its own hostname at the server and then reads its
-   responses. When `ALLOWED_HOSTS` is unset, an instance bound to a loopback
-   address (`mail-ai-web` with its default `127.0.0.1`) answers only to
-   `localhost`, `127.0.0.1` and `::1`, and an instance bound to any other
-   address — the image binds `0.0.0.0` — performs no check, because the
-   ingress hostname is not known to the app. A publicly reachable instance
-   should set `ALLOWED_HOSTS` to its public hostname plus `127.0.0.1`, which
-   the `HEALTHCHECK` uses. Kubernetes `httpGet` probes send the pod IP as
-   `Host`, so with `ALLOWED_HOSTS` set each probe needs
-   `httpHeaders: [{name: Host, value: 127.0.0.1}]`; the alternative is
-   `ALLOWED_HOSTS=*`, which leaves host checking to the ingress.
-2. **Read-only mode.** With `PUBLIC_READONLY=1`, every request other than
-   GET/HEAD/OPTIONS is refused with a 403.
-3. **Cross-origin writes.** A request other than GET/HEAD/OPTIONS is refused
-   with a 403 when its `Origin` header names a different host or port from the
-   request's `Host`, or, without an `Origin`, when `Sec-Fetch-Site` is
-   `cross-site`. A browser sets these headers on a form post or `fetch` from
-   another site, which needs no CORS preflight. Requests without either header
-   (curl, scripts) are not affected. A loopback `Origin` is accepted when the
-   request's own `Host` is loopback, which covers the Vite dev server proxying
-   `/api` on any port.
-4. **Body size.** `POST /api/import` accepts bodies up to `MAX_UPLOAD_MB` MiB;
-   every other path accepts up to 1 MiB and refuses a chunked body without a
-   `Content-Length`. Larger requests are refused with a 413. A full-corpus
-   export is about 220 MB at 100,000 messages, within the default 1024 MiB.
-
-Every response carries `X-Content-Type-Options: nosniff`,
-`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
-`Cross-Origin-Opener-Policy: same-origin`,
-`Cross-Origin-Resource-Policy: same-origin` (omitted in dev mode, where the
-frontend is served from the Vite origin), and a Content-Security-Policy that
-allows scripts, styles, images, fonts and API calls from the app's own origin
-only and forbids framing. The refusal of framing prevents a page from overlaying
-the dashboard's pull and scoring controls, which start paid API calls.
-
-`mail-ai-web --debug` refuses to start when the bind host is not a loopback
-address, because the Werkzeug debugger executes arbitrary Python code sent from
-the browser.
-
 ### Pipeline stages as Jobs
 
 The pipeline stages are batch work, not request handling, and each is
@@ -419,7 +360,7 @@ spec:
             fsGroup: 1001
           containers:
             - name: pull
-              image: mailing-list-ai-check:1.15.4
+              image: ghcr.io/ietf-tools/mailing-list-ai-check:1.15.3
               command: ["mail-ai-pull", "--all-lists", "--incremental"]
               envFrom:
                 - configMapRef: {name: mlac-config}
@@ -446,9 +387,9 @@ kubectl -n mlac cp mlac-export-all-20260819.jsonl.zst \
   "$(kubectl -n mlac get pod -l app=mlac-web -o name | head -1 | cut -d/ -f2)":/data/import.jsonl.zst
 
 # 2. verify without writing, then import
-kubectl -n mlac create job mlac-import-dryrun --image=mailing-list-ai-check:1.15.4 \
+kubectl -n mlac create job mlac-import-dryrun --image=ghcr.io/ietf-tools/mailing-list-ai-check:1.15.3 \
   -- mail-ai-import /data/import.jsonl.zst --dry-run
-kubectl -n mlac create job mlac-import --image=mailing-list-ai-check:1.15.4 \
+kubectl -n mlac create job mlac-import --image=ghcr.io/ietf-tools/mailing-list-ai-check:1.15.3 \
   -- mail-ai-import /data/import.jsonl.zst
 ```
 
