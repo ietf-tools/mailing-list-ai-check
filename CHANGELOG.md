@@ -37,6 +37,14 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.19.0] - 2026-11-14
+
+Summary: Extraction generation 7 via email-reply-extractor v1.3.0, whose parent-diff runs in time linear in its input and aligns on the longest common run of lines.
+
+- Upgrade email-reply-extractor from v1.2.0 to v1.3.0 (extraction generation 7: the parent-diff aligned-run rule matches around the longest common run of lines instead of using `difflib.SequenceMatcher`, and the collapsed "On … wrote:" header is inserted literally); stored extractions now read as stale and the dashboard offers re-derivation.
+- Over the 179,566 messages stored on 2026-11-14, generation 7 changes the extraction of 34 and the cleaned text of 13.
+- The upgrade includes the library's v1.2.3 fixes, which bound processing time on adversarial bodies without changing output.
+
 ## [1.18.0] - 2026-11-13
 
 Summary: Extracted replies are re-derived when their thread parent is stored after them, so a later pull no longer leaves text that was derived without the parent.
