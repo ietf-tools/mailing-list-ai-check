@@ -16,6 +16,8 @@ import sys
 from collections import Counter
 from collections.abc import Container, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
 from email_reply_extractor import clean_for_scoring
 from .config import Config
@@ -41,7 +43,7 @@ from .pangram import (
 )
 from .staleness import ParentRefreshSummary, refresh_for_new_parents
 from .stats_export import export_stats
-from .store import SETTING_PANGRAM_MODEL, Store, sha256_text
+from .store import SETTING_PANGRAM_MODEL, Extraction, Score, Store, sha256_text
 
 log = logging.getLogger("mailing_list_ai_check.pull")
 extract_log = logging.getLogger("mailing_list_ai_check.extract")
@@ -63,6 +65,19 @@ _PRICE_PER_100_WORDS = {"4": 0.05, "3": 0.005}
 _DEFAULT_PRICE_PER_100_WORDS = _PRICE_PER_100_WORDS["4"]
 #: Bulk API words are billed at a 20% discount off the realtime price.
 _BULK_PRICE_FACTOR = 0.8
+
+#: A verdict whose ``fraction_ai`` is at least this is checked by scoring the
+#: parts of its text separately (:func:`run_part_check`). It is the lower edge
+#: of Pangram's "AI" label.
+PART_CHECK_MIN_FRACTION_AI = 0.8
+
+#: Pangram's label bands. Across every stored verdict (96,346 rows, detector
+#: versions 4.0 and 4.1, checked 2026-11-15) the API's ``prediction_short`` is
+#: "AI" exactly when ``fraction_ai >= 0.8``, "Human" exactly when
+#: ``fraction_human > 0.9``, and "Mixed" otherwise; the part check labels the
+#: combined verdict of a message's parts by the same rule.
+_LABEL_AI_MIN_FRACTION_AI = 0.8
+_LABEL_HUMAN_ABOVE_FRACTION_HUMAN = 0.9
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -592,6 +607,7 @@ def run_extract(store: Store, limit: int | None = None) -> tuple[Counter[str], C
             extracted_text=result.text,
             method=result.method,
             status=result.status,
+            part_starts=result.part_starts,
         )
         status_counts[result.status] += 1
         method_counts[result.method] += 1
@@ -652,6 +668,16 @@ class ScoreSummary:
     failed: int = 0
     api_calls: int = 0
     words_sent: int = 0
+    #: Verdicts whose parts were scored this run (in a dry run: would be).
+    part_checked: int = 0
+    #: Of those, the verdicts the parts replaced (their label differed).
+    part_replaced: int = 0
+    #: Verdicts the part check found to have a single part (no call needed).
+    part_single: int = 0
+    #: Verdicts whose part check reused the check of identical cleaned text.
+    part_cache_hits: int = 0
+    #: Verdicts whose parts could not all be scored (left for a later run).
+    part_failed: int = 0
     #: Set by :func:`run_score` from the active detector generation.
     price_per_100_words: float = _DEFAULT_PRICE_PER_100_WORDS
 
@@ -665,6 +691,9 @@ class ScoreSummary:
             f"scored={self.scored} cache_hits={self.cache_hits} "
             f"too_short={self.too_short} failed={self.failed} "
             f"api_calls={self.api_calls} words_sent={self.words_sent} "
+            f"part_checked={self.part_checked} part_replaced={self.part_replaced} "
+            f"part_single={self.part_single} part_cache_hits={self.part_cache_hits} "
+            f"part_failed={self.part_failed} "
             f"est_spend=${self.estimated_spend:.4f}"
         )
 
@@ -787,6 +816,9 @@ def run_score(
     thread parent has been stored since the last check (:func:`refresh_parents`),
     so text made stale by a pull is never sent; a reply whose score that deletes
     joins this run's queue.
+
+    After the verdicts are stored, :func:`run_part_check` checks the AI verdicts
+    of texts written in several parts, within what is left of ``limit``.
     """
     # A reply whose parent arrived after it was extracted must be re-derived
     # before its text is sent; the extract stage normally has done this, and
@@ -835,6 +867,8 @@ def run_score(
                     label=cached.label,
                     detector_version=cached.detector_version,
                     raw_response=cached.raw_response,
+                    part_check_status=cached.part_check_status,
+                    part_check=cached.part_check,
                 )
             continue
 
@@ -895,7 +929,286 @@ def run_score(
 
     if pending and not dry_run:
         _score_bulk(store, client, pending, summary)
+
+    # The part check shares this run's cap on texts sent.
+    used = len(pending) if bulk else summary.scored + summary.failed
+    run_part_check(
+        store,
+        client,
+        summary,
+        limit=max(0, limit - used),
+        min_words=min_words,
+        dry_run=dry_run,
+        message_ids=message_ids,
+        bulk=bulk,
+        generation=generation,
+    )
     return summary
+
+
+def label_for_fractions(fraction_ai: float, fraction_human: float) -> str:
+    """The Pangram label for a verdict's fractions (see the band constants)."""
+    if fraction_ai >= _LABEL_AI_MIN_FRACTION_AI:
+        return "AI"
+    if fraction_human > _LABEL_HUMAN_ABOVE_FRACTION_HUMAN:
+        return "Human"
+    return "Mixed"
+
+
+def merge_short_parts(parts: Sequence[str], min_words: int) -> list[str]:
+    """Join each part under ``min_words`` words to the part after it.
+
+    A run of short parts accumulates until it reaches ``min_words``; a short
+    remainder at the end joins the last merged part. The detector's verdict on
+    a very short text is unreliable (the same floor gates whole texts), so a
+    two-word line between two quotes is scored with the answer that follows it.
+    """
+    merged: list[str] = []
+    pending = ""
+    for part in parts:
+        pending = f"{pending}\n\n{part}" if pending else part
+        if len(pending.split()) >= min_words:
+            merged.append(pending)
+            pending = ""
+    if pending:
+        if merged:
+            merged[-1] = f"{merged[-1]}\n\n{pending}"
+        else:
+            merged.append(pending)
+    return merged
+
+
+def scoring_parts(store: Store, extraction: Extraction, min_words: int) -> list[str]:
+    """The texts the part check scores for ``extraction``.
+
+    The cleaned text divided at the stored part boundaries (cleaned exactly as
+    :func:`run_score` cleans the whole text, HTML signature hint included),
+    with short parts merged by :func:`merge_short_parts`. A text written as one
+    run, or one whose boundaries were never recorded, is a single part.
+    """
+    hint = _html_signature_hint(store, extraction.message_id)
+    parts = clean_for_scoring(
+        extraction.extracted_text, hint, part_starts=extraction.part_starts or ()
+    ).parts
+    return merge_short_parts(parts, min_words)
+
+
+@dataclass
+class _PartGroup:
+    """One cleaned text whose parts the part check scores this run.
+
+    ``scores`` lists every verdict sharing that cleaned text (a cross-post);
+    the parts are scored once and the outcome is recorded on each.
+    """
+
+    parts: list[str]
+    scores: list[Score]
+
+
+def _verdict(result: Any) -> dict[str, Any]:
+    """The stored fields of one Pangram verdict."""
+    return {
+        "fraction_ai": result.fraction_ai,
+        "fraction_ai_assisted": result.fraction_ai_assisted,
+        "fraction_human": result.fraction_human,
+        "label": result.prediction_short,
+        "detector_version": result.version,
+    }
+
+
+def _apply_part_check(
+    store: Store, group: _PartGroup, results: Sequence[Any], summary: ScoreSummary
+) -> None:
+    """Combine the parts' verdicts and record the check on every verdict of ``group``.
+
+    Each part's fractions are weighted by its word count, and the combined
+    verdict is labelled by :func:`label_for_fractions`. When that label differs
+    from the whole-text label, the combined verdict replaces the stored one.
+    """
+    words = [len(part.split()) for part in group.parts]
+    total = sum(words)
+
+    def combined(key: str) -> float:
+        return sum(w * (getattr(r, key) or 0.0) for w, r in zip(words, results)) / total
+
+    fraction_ai = combined("fraction_ai")
+    fraction_ai_assisted = combined("fraction_ai_assisted")
+    fraction_human = combined("fraction_human")
+    label = label_for_fractions(fraction_ai, fraction_human)
+    detector_version = results[0].version
+    parts = [
+        {"words": w, "text_sha256": sha256_text(part), **_verdict(r)}
+        for w, part, r in zip(words, group.parts, results)
+    ]
+    for score in group.scores:
+        replaced = label != score.label
+        detail = {
+            "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "replaced": replaced,
+            "whole": {
+                "fraction_ai": score.fraction_ai,
+                "fraction_ai_assisted": score.fraction_ai_assisted,
+                "fraction_human": score.fraction_human,
+                "label": score.label,
+                "detector_version": score.detector_version,
+            },
+            "parts": parts,
+            "combined": {
+                "fraction_ai": fraction_ai,
+                "fraction_ai_assisted": fraction_ai_assisted,
+                "fraction_human": fraction_human,
+                "label": label,
+            },
+        }
+        if replaced:
+            store.record_part_check(
+                score.id,
+                "checked",
+                detail,
+                fraction_ai=fraction_ai,
+                fraction_ai_assisted=fraction_ai_assisted,
+                fraction_human=fraction_human,
+                label=label,
+                detector_version=detector_version,
+            )
+            summary.part_replaced += 1
+        else:
+            store.record_part_check(score.id, "checked", detail)
+        summary.part_checked += 1
+        score_log.debug(
+            "part check score id=%s parts=%d whole=%s parts_label=%s replaced=%s",
+            score.id,
+            len(group.parts),
+            score.label,
+            label,
+            replaced,
+        )
+
+
+def run_part_check(
+    store: Store,
+    client: PangramClient | None,
+    summary: ScoreSummary,
+    *,
+    limit: int,
+    min_words: int = SCORE_MIN_WORDS,
+    dry_run: bool = False,
+    message_ids: Container[int] | None = None,
+    bulk: bool = False,
+    generation: str | None = None,
+) -> None:
+    """Check AI verdicts by scoring the parts of their text separately.
+
+    An inline reply is several runs of the author's text written between
+    quoted passages; extraction joins them into one text, and the detector can
+    rate the joined text differently from each run on its own. Every verdict
+    with ``fraction_ai`` at or above :data:`PART_CHECK_MIN_FRACTION_AI` whose
+    extraction has recorded part boundaries is checked once:
+
+    - fewer than two parts (after :func:`merge_short_parts`): recorded as
+      ``single``, with no API call;
+    - identical cleaned text already checked (a cross-post): that check is
+      copied, with no API call;
+    - otherwise each part is scored, the parts' verdicts are combined by word
+      count, and the check is recorded as ``checked``. When the combined label
+      differs from the whole-text label it replaces the stored verdict.
+
+    ``limit`` caps the part texts sent (a verdict is checked only when all its
+    parts fit); verdicts over it stay queued for a later run. In a dry run
+    nothing is written or sent; the tallies report what would happen.
+    ``generation`` restricts the copy of an earlier check to one detector
+    generation, as for the score cache.
+    """
+    groups: dict[str, _PartGroup] = {}
+    budget = limit
+    for score, extraction in store.iter_scores_needing_part_check(PART_CHECK_MIN_FRACTION_AI):
+        if message_ids is not None and extraction.message_id not in message_ids:
+            continue
+        group = groups.get(score.text_sha256)
+        if group is not None:
+            group.scores.append(score)
+            continue
+
+        parts = scoring_parts(store, extraction, min_words)
+        if len(parts) < 2:
+            summary.part_single += 1
+            if not dry_run:
+                store.record_part_check(score.id, "single")
+            continue
+
+        cached = store.find_part_check_by_text_sha256(score.text_sha256)
+        if cached is not None and (
+            generation is None or (cached.detector_version or "").startswith(f"{generation}.")
+        ):
+            summary.part_cache_hits += 1
+            if not dry_run:
+                replaced = cached.label != score.label
+                store.record_part_check(
+                    score.id,
+                    "checked",
+                    cached.part_check,
+                    **(
+                        {
+                            "fraction_ai": cached.fraction_ai,
+                            "fraction_ai_assisted": cached.fraction_ai_assisted,
+                            "fraction_human": cached.fraction_human,
+                            "label": cached.label,
+                            "detector_version": cached.detector_version,
+                        }
+                        if replaced
+                        else {}
+                    ),
+                )
+            continue
+
+        if len(parts) > budget:
+            continue
+        budget -= len(parts)
+        groups[score.text_sha256] = _PartGroup(parts=parts, scores=[score])
+        summary.words_sent += sum(len(part.split()) for part in parts)
+
+    if not groups:
+        return
+    if dry_run:
+        summary.part_checked += sum(len(g.scores) for g in groups.values())
+        return
+
+    assert client is not None  # guaranteed by score_main outside dry-run
+    if bulk:
+        items = {
+            f"{sha}:{i}": part
+            for sha, group in groups.items()
+            for i, part in enumerate(group.parts)
+        }
+        summary.api_calls += len(items)
+        try:
+            outcome = client.predict_bulk(items)
+        except PangramError as exc:
+            summary.part_failed += sum(len(g.scores) for g in groups.values())
+            score_log.warning("bulk part check failed for all %d texts: %s", len(items), exc)
+            return
+        for sha, group in groups.items():
+            results = [outcome.results.get(f"{sha}:{i}") for i in range(len(group.parts))]
+            if any(r is None for r in results):
+                summary.part_failed += len(group.scores)
+                score_log.warning("part check incomplete for score id=%s", group.scores[0].id)
+                continue
+            _apply_part_check(store, group, results, summary)
+        return
+
+    for group in groups.values():
+        results = []
+        for part in group.parts:
+            summary.api_calls += 1
+            try:
+                results.append(client.predict(part))
+            except PangramError as exc:
+                score_log.warning("part check failed for score id=%s: %s", group.scores[0].id, exc)
+                break
+        if len(results) < len(group.parts):
+            summary.part_failed += len(group.scores)
+            continue
+        _apply_part_check(store, group, results, summary)
 
 
 def _score_bulk(

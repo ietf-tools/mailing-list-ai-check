@@ -57,7 +57,10 @@ from .codec import CodecError, compressed_path, open_read_text, open_write_text
 from email_reply_extractor import EXTRACTION_VERSION
 from .store import (
     EXTRACTION_STATUSES,
+    PART_CHECK_STATUSES,
     Store,
+    decode_part_starts,
+    encode_part_starts,
     extraction_version_for_app_version,
     sha256_text,
     version_key,
@@ -347,6 +350,22 @@ def _select_lists(
     return selected
 
 
+def _file_part_starts(extraction: dict[str, Any], lineno: int) -> list[int] | None:
+    """The part boundaries an embedded extraction records, or ``None``.
+
+    Absent or null in a file written before boundaries were recorded. Anything
+    other than a list of non-negative integers is corruption.
+    """
+    value = extraction.get("part_starts")
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(
+        isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in value
+    ):
+        raise ExportImportError(f"line {lineno}: invalid extraction part_starts {value!r}")
+    return value
+
+
 def _file_generation(extraction: dict[str, Any], pipeline_version: str | None) -> int | None:
     """The extraction generation an imported ``extraction`` record stands for.
 
@@ -607,6 +626,16 @@ def export_lists(
                             "raw_response": sc["raw_response"],
                             "text_sha256": sc["text_sha256"],
                             "scored_at": sc["scored_at"],
+                            # Absent (not null) when the verdict has not been
+                            # part-checked, as in an older export.
+                            **(
+                                {
+                                    "part_check_status": sc["part_check_status"],
+                                    "part_check": sc["part_check"],
+                                }
+                                if sc["part_check_status"] is not None
+                                else {}
+                            ),
                         }
                     extraction_obj = {
                         "method": ext["method"],
@@ -616,6 +645,13 @@ def export_lists(
                         "created_at": ext["created_at"],
                         "text": _text_pointer(ext["extracted_text"], m["raw_body"]),
                         "sha256": sha256_text(ext["extracted_text"]),
+                        # Absent (not null) for a row derived before part
+                        # boundaries were recorded, as in an older export.
+                        **(
+                            {"part_starts": decode_part_starts(ext["part_starts"])}
+                            if ext["part_starts"] is not None
+                            else {}
+                        ),
                         "score": score_obj,
                     }
 
@@ -1004,8 +1040,8 @@ class _Importer:
         cur = self.conn.execute(
             "INSERT INTO extractions("
             "message_id, extracted_text, method, char_count, status, created_at, "
-            "pipeline_version, extraction_version"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "pipeline_version, extraction_version, part_starts"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 message_pk,
                 text,
@@ -1015,6 +1051,7 @@ class _Importer:
                 extraction["created_at"],
                 pipeline_version,
                 _file_generation(extraction, pipeline_version),
+                encode_part_starts(_file_part_starts(extraction, lineno)),
             ),
         )
 
@@ -1026,11 +1063,18 @@ class _Importer:
             label = score.get("label")
             if label == "AI-Assisted":
                 label = "Mixed"
+            part_check_status = score.get("part_check_status")
+            if part_check_status is not None and part_check_status not in PART_CHECK_STATUSES:
+                raise ExportImportError(
+                    f"line {lineno}: invalid part_check_status {part_check_status!r}; "
+                    f"expected one of {PART_CHECK_STATUSES}"
+                )
             self.conn.execute(
                 "INSERT INTO scores("
                 "extraction_id, fraction_ai, fraction_ai_assisted, fraction_human, "
-                "label, detector_version, raw_response, text_sha256, scored_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "label, detector_version, raw_response, text_sha256, scored_at, "
+                "part_check_status, part_check"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     cur.lastrowid,
                     score.get("fraction_ai"),
@@ -1041,6 +1085,8 @@ class _Importer:
                     score.get("raw_response"),
                     score["text_sha256"],
                     score["scored_at"],
+                    part_check_status,
+                    score.get("part_check"),
                 ),
             )
             return True
@@ -1071,7 +1117,10 @@ class _Importer:
         Presence/absence on either side counts as a difference; otherwise the
         extraction is compared on text ``sha256``/``method``/``status``/
         ``char_count`` and the score on ``text_sha256``, the three fractions,
-        ``label``, ``detector_version`` and ``raw_response``.
+        ``label``, ``detector_version``, ``raw_response`` and the part check
+        (``part_check_status`` / ``part_check``). The extraction's
+        ``part_starts`` is not compared; :meth:`_advance_generation` adopts the
+        file's when the target has none.
         """
         target_ext = self.conn.execute(
             "SELECT * FROM extractions WHERE message_id = ?", (message_pk,)
@@ -1105,6 +1154,8 @@ class _Importer:
                 ("label", "label"),
                 ("detector_version", "detector_version"),
                 ("raw_response", "raw_response"),
+                ("part_check_status", "part_check_status"),
+                ("part_check", "part_check"),
             ):
                 if target_score[column] != file_score.get(key):
                     return False
@@ -1126,14 +1177,17 @@ class _Importer:
         """
         if extraction is None:
             return False
-        generation = _file_generation(extraction, file_version)
-        if generation is None:
-            return False
         target = self.conn.execute(
             "SELECT id, extraction_version FROM extractions WHERE message_id = ?", (message_pk,)
         ).fetchone()
+        generation = _file_generation(extraction, file_version)
+        if generation is None:
+            if target is not None:
+                self._adopt_part_starts(target["id"], extraction)
+            return False
         if target is None:  # pragma: no cover - _derived_matches saw a row
             return False
+        self._adopt_part_starts(target["id"], extraction)
         if (target["extraction_version"] or 0) >= generation:
             return False
         self.conn.execute(
@@ -1141,6 +1195,21 @@ class _Importer:
             (generation, target["id"]),
         )
         return True
+
+    def _adopt_part_starts(self, extraction_id: int, extraction: dict[str, Any]) -> None:
+        """Copy the file's part boundaries onto a target extraction that has none.
+
+        Only reached for an extraction whose text the file has shown to be
+        identical, so the file's boundaries describe the target's text. A
+        target that already records boundaries keeps them.
+        """
+        part_starts = extraction.get("part_starts")
+        if part_starts is None:
+            return
+        self.conn.execute(
+            "UPDATE extractions SET part_starts = ? WHERE id = ? AND part_starts IS NULL",
+            (encode_part_starts(_file_part_starts(extraction, 0)), extraction_id),
+        )
 
     def _refresh_derived(
         self,

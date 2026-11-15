@@ -36,8 +36,8 @@ database on re-import.
 | `messages` rows | full rows incl. `raw_body`, `raw_html` |
 | sender `addresses` | full rows (keyed by `email`) for addresses referenced by exported messages |
 | `persons` | canonical name + membership, for persons referenced by those addresses |
-| `extractions` | metadata + a text **pointer** (see below) |
-| `scores` | full row: fractions, label, detector version, `raw_response` (the complete Pangram JSON), `text_sha256`, timestamps |
+| `extractions` | metadata + a text **pointer** (see below), and the part boundaries (`part_starts`) when recorded |
+| `scores` | full row: fractions, label, detector version, `raw_response` (the complete Pangram JSON), `text_sha256`, timestamps, and the part check (`part_check_status`, `part_check`) when present |
 
 What was *sent* to Pangram is the cleaned text, which the pipeline derives on
 the fly and never persists; the database (and therefore the export) carries
@@ -225,12 +225,16 @@ Persons have no natural key, so each gets a file-scoped synthetic key
                                          // in files written before the key existed
    "text": {"kind": "span", "start": 0, "length": 42},   // see "Text pointers"
    "sha256": "<sha256 of extracted_text>",
+   "part_starts": [2, 5],                // the extraction's part boundaries; absent
+                                         // when not recorded (and in older files)
    "score": {                            // null when the extraction has no score row
      "fraction_ai": 0.95, "fraction_ai_assisted": 0.03, "fraction_human": 0.02,
      "label": "AI", "detector_version": "…",
      "raw_response": "<verbatim stored JSON string, may be null>",
      "text_sha256": "<sha256 of the cleaned text sent to Pangram>",
-     "scored_at": "…"
+     "scored_at": "…",
+     "part_check_status": "checked",     // "single" or "checked"; both keys absent
+     "part_check": "<stored JSON string>" // when the verdict has not been part-checked
    }
  }}
 
@@ -420,6 +424,15 @@ Per record type:
 Any unknown `type`, out-of-order record, forward reference (message naming an
 unseen folder/email, address naming an unseen `person_key`), invalid
 extraction status, or JSON parse failure → error, rollback, non-zero exit.
+
+Part data. A file's `part_starts` and part check are written with the
+extraction and score they belong to. When an existing message's derived data is
+judged equal to the file's, the part check (`part_check_status`, `part_check`)
+is part of that comparison, and `part_starts` is not: a target extraction that
+records no boundaries adopts the file's, and one that records boundaries keeps
+them. A `part_check_status` other than `single` or `checked`, or a
+`part_starts` that is not a list of non-negative integers, aborts the import as
+corrupt.
 
 ## Public API — `src/mailing_list_ai_check/export_import.py`
 

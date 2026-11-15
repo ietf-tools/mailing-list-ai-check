@@ -127,6 +127,9 @@ def test_migration_backfills_extraction_version_from_message(tmp_path):
         s.conn.execute("ALTER TABLE messages DROP COLUMN auto_generated")
         s.conn.execute("ALTER TABLE messages DROP COLUMN from_name")
         s.conn.execute("ALTER TABLE messages DROP COLUMN raw_headers")
+        s.conn.execute("ALTER TABLE extractions DROP COLUMN part_starts")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check_status")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check")
         s.conn.commit()
     with Store(db) as s:
         after = s.extraction_for_message(message.id)

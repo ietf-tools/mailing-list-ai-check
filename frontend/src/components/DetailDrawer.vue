@@ -148,6 +148,37 @@ const scoredAt = computed(() => {
   return sc?.scored_at ? `scored ${fmtDate(sc.scored_at)}` : ''
 })
 
+// The part check: present when the verdict was on text written in several
+// parts between quoted passages and each part was scored separately. When the
+// parts' combined verdict differed it replaced the whole-text verdict, and the
+// windows below still describe the whole text.
+const partCheck = computed(() => detail.value?.score?.part_check || null)
+const fmtAi = (v) => (v == null || !Number.isFinite(Number(v)) ? '—' : Number(v).toFixed(2))
+const partRows = computed(() =>
+  (partCheck.value?.parts || []).map((p, i) => ({
+    index: i + 1,
+    words: p.words == null ? '—' : fmtInt(p.words),
+    ai: fmtAi(p.fraction_ai),
+    label: p.label || '—',
+    color: LABEL_COLORS[p.label] || LABEL_COLORS.unscored,
+  })),
+)
+const partCheckNote = computed(() => {
+  const pc = partCheck.value
+  if (!pc) return ''
+  const whole = pc.whole || {}
+  const combined = pc.combined || {}
+  const n = (pc.parts || []).length
+  const wholeDesc = `${whole.label || '—'} (AI ${fmtAi(whole.fraction_ai)})`
+  const combinedDesc = `${combined.label || '—'} (AI ${fmtAi(combined.fraction_ai)})`
+  return pc.replaced
+    ? `The text is written in ${n} parts between quoted passages. Scored as one text it was ${wholeDesc}; ` +
+        `scored part by part, weighted by word count, it is ${combinedDesc}, which replaces the whole-text verdict. ` +
+        'The windows below describe the whole text.'
+    : `The text is written in ${n} parts between quoted passages. Scored part by part, weighted by word count, ` +
+        `it is ${combinedDesc}, the same label as the whole-text verdict ${wholeDesc}, which stands.`
+})
+
 // One row per Pangram window, for the analysis table and the text markers.
 const windows = computed(() =>
   (detail.value?.score?.windows || []).map((w) => {
@@ -437,6 +468,31 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
               <span v-if="scored" class="analysis-meta">· {{ scoredAt }}</span>
             </div>
 
+            <template v-if="partCheck">
+              <div class="win-head">Checked by parts</div>
+              <p class="win-note">{{ partCheckNote }}</p>
+              <table class="win-table">
+                <thead>
+                  <tr>
+                    <th style="width: 34px;">Part</th>
+                    <th style="width: 62px; text-align: right;">Words</th>
+                    <th style="width: 54px; text-align: right;">AI</th>
+                    <th>Label</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="p in partRows" :key="p.index">
+                    <td>{{ p.index }}</td>
+                    <td style="text-align: right;">{{ p.words }}</td>
+                    <td style="text-align: right;">{{ p.ai }}</td>
+                    <td>
+                      <span class="part-swatch" :style="{ background: p.color }"></span>{{ p.label }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </template>
+
             <template v-if="windows.length">
               <div class="win-head">Windows</div>
               <p class="win-note">
@@ -677,6 +733,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   text-transform: none;
 }
 /* Section heading and its one-line note above the per-window table. */
+.part-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
 .win-head {
   font-size: 10px;
   font-weight: 700;

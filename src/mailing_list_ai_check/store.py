@@ -64,6 +64,22 @@ _TIMING_STATUSES = ("ok", "too_short")
 #: Pangram ``prediction_short`` labels that count as "flagged" for the dashboard.
 #: Only fully AI verdicts are flagged; "Human"/"Mixed" are not (assisted or
 #: partial AI content arrives as "Mixed" — see ``fraction_ai_assisted``).
+#: Values of ``scores.part_check_status`` (NULL aside); see migration 19.
+PART_CHECK_STATUSES = ("single", "checked")
+
+
+def encode_part_starts(part_starts: Sequence[int] | None) -> str | None:
+    """The JSON text stored in ``extractions.part_starts`` (``None`` stays NULL)."""
+    return None if part_starts is None else json.dumps(list(part_starts))
+
+
+def decode_part_starts(value: str | None) -> tuple[int, ...] | None:
+    """The part boundaries stored in ``extractions.part_starts``, or ``None``."""
+    if value is None:
+        return None
+    return tuple(int(i) for i in json.loads(value))
+
+
 FLAGGED_LABELS = ("AI",)
 #: Pre-built SQL ``IN`` list of the flagged labels. Values are trusted constants
 #: defined here (no user input), so inlining them is safe from injection.
@@ -436,6 +452,27 @@ CREATE INDEX IF NOT EXISTS idx_messages_list_date
 ANALYZE;
 """
 
+# Part boundaries and the part check (v1.21.0).
+#
+# - extractions.part_starts: the stage-1 ``ExtractionResult.part_starts`` as a
+#   JSON array of line indices into ``extracted_text``. NULL for a row derived
+#   before email-reply-extractor 1.4.0 reported parts; the generation-8
+#   re-derivation fills it.
+# - scores.part_check_status: NULL until the part check has looked at a
+#   verdict; 'single' when the cleaned text has fewer than two parts, so there
+#   was nothing to check; 'checked' when its parts were scored separately.
+# - scores.part_check: for a 'checked' row, a JSON object holding the whole-text
+#   verdict, each part's verdict and whether the parts' verdict replaced the
+#   whole-text one (see cli.run_part_check).
+_MIGRATION_019 = """
+ALTER TABLE extractions ADD COLUMN part_starts TEXT;
+
+ALTER TABLE scores ADD COLUMN part_check_status TEXT
+    CHECK (part_check_status IN ('single', 'checked'));
+
+ALTER TABLE scores ADD COLUMN part_check TEXT;
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _MIGRATION_001),
     (2, _MIGRATION_002),
@@ -455,6 +492,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (16, _MIGRATION_016),
     (17, _MIGRATION_017),
     (18, _MIGRATION_018),
+    (19, _MIGRATION_019),
 ]
 
 #: The migrations whose backfill runs in Python (see :meth:`Store.__init__`).
@@ -700,6 +738,9 @@ class Extraction:
     created_at: str
     pipeline_version: str | None = None
     extraction_version: int | None = None
+    #: The stage-1 part boundaries (``ExtractionResult.part_starts``); ``None``
+    #: for a row derived before they were recorded.
+    part_starts: tuple[int, ...] | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Extraction":
@@ -713,6 +754,7 @@ class Extraction:
             created_at=row["created_at"],
             pipeline_version=row["pipeline_version"],
             extraction_version=row["extraction_version"],
+            part_starts=decode_part_starts(row["part_starts"]),
         )
 
 
@@ -730,6 +772,10 @@ class Score:
     raw_response: str | None
     text_sha256: str
     scored_at: str
+    #: ``None`` (not looked at), ``"single"`` or ``"checked"``; see migration 19.
+    part_check_status: str | None = None
+    #: JSON text of the part check, for a ``"checked"`` row.
+    part_check: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Score":
@@ -744,6 +790,8 @@ class Score:
             raw_response=row["raw_response"],
             text_sha256=row["text_sha256"],
             scored_at=row["scored_at"],
+            part_check_status=row["part_check_status"],
+            part_check=row["part_check"],
         )
 
 
@@ -951,7 +999,9 @@ _MESSAGE_COLUMNS = """
     s.label AS label,
     s.detector_version AS detector_version,
     s.raw_response AS raw_response,
-    s.scored_at AS scored_at
+    s.scored_at AS scored_at,
+    s.part_check_status AS part_check_status,
+    s.part_check AS part_check
 """
 
 #: The slim per-message columns a rug plot needs: the id to open the message,
@@ -1717,6 +1767,7 @@ class Store:
         created_at: str | None = None,
         pipeline_version: str | None = None,
         extraction_version: int | None = None,
+        part_starts: Sequence[int] | None = None,
     ) -> Extraction:
         """Record the extraction for a message (one per message).
 
@@ -1727,7 +1778,8 @@ class Store:
         generation (:data:`~email_reply_extractor.extraction.EXTRACTION_VERSION`)
         and its ``pipeline_version`` — which is also re-stamped on the owning
         message — with the current package version (:data:`__version__`); tests
-        may pass explicit values.
+        may pass explicit values. ``part_starts`` is the stage-1 result's part
+        boundaries; ``None`` leaves the column NULL (not recorded).
         """
         if status not in EXTRACTION_STATUSES:
             raise ValueError(
@@ -1738,8 +1790,8 @@ class Store:
         cur = self.conn.execute(
             "INSERT INTO extractions("
             "message_id, extracted_text, method, char_count, status, created_at, "
-            "pipeline_version, extraction_version"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "pipeline_version, extraction_version, part_starts"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 message_id,
                 extracted_text,
@@ -1749,6 +1801,7 @@ class Store:
                 created_at or _utcnow_iso(),
                 version,
                 generation,
+                encode_part_starts(part_starts),
             ),
         )
         self.conn.execute(
@@ -1898,6 +1951,32 @@ class Store:
             ((row["v"], row["n"]) for row in rows), key=lambda p: (p[0] is not None, p[0])
         )
 
+    def set_part_starts(self, extraction_id: int, part_starts: Sequence[int] | None) -> bool:
+        """Store an extraction's part boundaries; return whether they changed.
+
+        Used when a re-derivation keeps the text but reports its boundaries (or
+        reports different ones). A changed value returns a score whose part
+        check found a single part (``part_check_status = 'single'``) to the part
+        check queue, since that finding was made on the old boundaries. A
+        ``'checked'`` verdict is kept: its parts were scored and paid for.
+        """
+        encoded = encode_part_starts(part_starts)
+        row = self.conn.execute(
+            "SELECT part_starts FROM extractions WHERE id = ?", (extraction_id,)
+        ).fetchone()
+        if row is None or row["part_starts"] == encoded:
+            return False
+        self.conn.execute(
+            "UPDATE extractions SET part_starts = ? WHERE id = ?", (encoded, extraction_id)
+        )
+        self.conn.execute(
+            "UPDATE scores SET part_check_status = NULL "
+            "WHERE extraction_id = ? AND part_check_status = 'single'",
+            (extraction_id,),
+        )
+        self.conn.commit()
+        return True
+
     def set_extraction_version(
         self,
         extraction_id: int,
@@ -1933,6 +2012,7 @@ class Store:
         char_count: int | None = None,
         pipeline_version: str | None = None,
         extraction_version: int | None = None,
+        part_starts: Sequence[int] | None = None,
     ) -> Extraction | None:
         """Rewrite an existing extraction in place; return the updated row.
 
@@ -1942,7 +2022,8 @@ class Store:
         existing ``scores`` row survives — invalidating a score whose text has
         moved is the caller's decision (see :meth:`delete_score_for_extraction`).
         ``created_at`` is left alone: it records when the message was first
-        extracted. Returns ``None`` if no such extraction exists.
+        extracted. ``part_starts`` replaces the stored boundaries (``None``
+        clears them). Returns ``None`` if no such extraction exists.
         """
         if status not in EXTRACTION_STATUSES:
             raise ValueError(
@@ -1954,7 +2035,8 @@ class Store:
         generation = extraction_version if extraction_version is not None else EXTRACTION_VERSION
         self.conn.execute(
             "UPDATE extractions SET extracted_text = ?, method = ?, char_count = ?, "
-            "status = ?, pipeline_version = ?, extraction_version = ? WHERE id = ?",
+            "status = ?, pipeline_version = ?, extraction_version = ?, part_starts = ? "
+            "WHERE id = ?",
             (
                 extracted_text,
                 method,
@@ -1962,8 +2044,15 @@ class Store:
                 status,
                 version,
                 generation,
+                encode_part_starts(part_starts),
                 extraction_id,
             ),
+        )
+        # A kept score's single-part finding was made on the old boundaries.
+        self.conn.execute(
+            "UPDATE scores SET part_check_status = NULL "
+            "WHERE extraction_id = ? AND part_check_status = 'single'",
+            (extraction_id,),
         )
         self.conn.execute(
             "UPDATE messages SET pipeline_version = ? "
@@ -2032,11 +2121,15 @@ class Store:
         raw_response: Mapping[str, Any] | str | None = None,
         scored_at: str | None = None,
         pipeline_version: str | None = None,
+        part_check_status: str | None = None,
+        part_check: str | None = None,
     ) -> Score:
         """Store a Pangram verdict for ``extraction_id`` (one per extraction).
 
         ``raw_response`` may be a mapping (serialized to JSON text) or a
-        pre-serialized JSON string.
+        pre-serialized JSON string. ``part_check_status`` / ``part_check`` copy
+        a part check along with a cached verdict (see
+        :meth:`record_part_check`); a new verdict leaves them NULL.
 
         Re-stamps the owning message's ``pipeline_version`` to the current
         package version (:data:`__version__`); tests may pass an explicit value.
@@ -2048,8 +2141,9 @@ class Store:
         cur = self.conn.execute(
             "INSERT INTO scores("
             "extraction_id, fraction_ai, fraction_ai_assisted, fraction_human, "
-            "label, detector_version, raw_response, text_sha256, scored_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "label, detector_version, raw_response, text_sha256, scored_at, "
+            "part_check_status, part_check"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 extraction_id,
                 fraction_ai,
@@ -2060,6 +2154,8 @@ class Store:
                 raw_json,
                 text_sha256,
                 scored_at or _utcnow_iso(),
+                part_check_status,
+                part_check,
             ),
         )
         self.conn.execute(
@@ -2098,6 +2194,95 @@ class Store:
         )
         self.conn.commit()
         return cur.rowcount > 0
+
+    def iter_scores_needing_part_check(
+        self, min_fraction_ai: float
+    ) -> Iterator[tuple[Score, Extraction]]:
+        """Yield the verdicts the part check has yet to look at.
+
+        A verdict qualifies when its ``fraction_ai`` is at least
+        ``min_fraction_ai``, its ``part_check_status`` is NULL, and its
+        extraction is ``ok`` with recorded part boundaries (an extraction
+        derived before boundaries were recorded waits for its re-derivation).
+        Rows come back in score order.
+        """
+        rows = self.conn.execute(
+            "SELECT s.id AS score_id, e.id AS extraction_id FROM scores s "
+            "JOIN extractions e ON e.id = s.extraction_id "
+            "WHERE s.fraction_ai >= ? AND s.part_check_status IS NULL "
+            "AND e.status = 'ok' AND e.part_starts IS NOT NULL ORDER BY s.id",
+            (min_fraction_ai,),
+        ).fetchall()
+        for row in rows:
+            score = self.conn.execute(
+                "SELECT * FROM scores WHERE id = ?", (row["score_id"],)
+            ).fetchone()
+            extraction = self.get_extraction(row["extraction_id"])
+            if score is not None and extraction is not None:
+                yield Score.from_row(score), extraction
+
+    def find_part_check_by_text_sha256(self, text_sha256: str) -> Score | None:
+        """Return a ``'checked'`` verdict on identical cleaned text, or ``None``.
+
+        The part-check counterpart of :meth:`find_score_by_text_sha256`: a
+        cross-posted message carries the same cleaned text, and its parts need
+        not be scored twice.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM scores WHERE text_sha256 = ? AND part_check_status = 'checked' "
+            "ORDER BY id LIMIT 1",
+            (text_sha256,),
+        ).fetchone()
+        return Score.from_row(row) if row else None
+
+    def record_part_check(
+        self,
+        score_id: int,
+        status: str,
+        part_check: Mapping[str, Any] | str | None = None,
+        *,
+        fraction_ai: float | None = None,
+        fraction_ai_assisted: float | None = None,
+        fraction_human: float | None = None,
+        label: str | None = None,
+        detector_version: str | None = None,
+    ) -> None:
+        """Record the part check's outcome on a verdict.
+
+        ``status`` is one of :data:`PART_CHECK_STATUSES`. When ``label`` is
+        given, the parts' verdict replaces the row's fractions, label and
+        detector version (it is authoritative); otherwise they are left as the
+        whole-text verdict. ``raw_response`` always remains the whole-text
+        Pangram response, and ``part_check`` (a mapping serialized to JSON, or
+        JSON text) holds the whole-text verdict and each part's.
+        """
+        if status not in PART_CHECK_STATUSES:
+            raise ValueError(
+                f"invalid part check status {status!r}; expected one of {PART_CHECK_STATUSES}"
+            )
+        detail = json.dumps(part_check) if isinstance(part_check, Mapping) else part_check
+        if label is None:
+            self.conn.execute(
+                "UPDATE scores SET part_check_status = ?, part_check = ? WHERE id = ?",
+                (status, detail, score_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE scores SET part_check_status = ?, part_check = ?, fraction_ai = ?, "
+                "fraction_ai_assisted = ?, fraction_human = ?, label = ?, "
+                "detector_version = COALESCE(?, detector_version) WHERE id = ?",
+                (
+                    status,
+                    detail,
+                    fraction_ai,
+                    fraction_ai_assisted,
+                    fraction_human,
+                    label,
+                    detector_version,
+                    score_id,
+                ),
+            )
+        self.conn.commit()
 
     # -- settings -------------------------------------------------------------
 

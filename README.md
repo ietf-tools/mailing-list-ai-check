@@ -234,6 +234,15 @@ it, and `--limit` caps the texts submitted. Bulk suits large catch-up runs; for
 a handful of new messages the realtime default is simpler and faster. Texts a
 bulk job fails to score stay queued and are retried on the next run.
 
+After the verdicts are stored, each run checks the AI verdicts (`fraction_ai`
+of 0.8 or more) of text written in several parts — an inline reply whose
+answers sit between quoted passages. Each part is scored separately (parts
+under 50 words are merged into the next), the parts' verdicts are combined by
+word count, and when the combined label differs from the whole-text label it
+replaces the stored verdict. The check is recorded on the verdict and shown in
+the message drawer. Its part texts count towards `--limit`, and under `--bulk`
+they are sent as a second Bulk API job.
+
 The detector can be changed for one run with `--model {pangram-4,default}`
 (`default` routes to Pangram 3 until Pangram deprecates it), or persistently
 with the dashboard's "Use Pangram v3 (old)" header switch, which applies to
@@ -297,7 +306,8 @@ sender's replies point at, and other senders' replies to this sender.
 
 The message drawer, opened from any row and deep-linked at `/messages/<id>`,
 shows the message metadata and reply-timing band, the analysis card (the Pangram
-prediction, headline, detector version, and one row per scored window), and the
+prediction, headline, detector version, the part check when the verdict was
+checked part by part, and one row per scored window), and the
 text that was analyzed, numbered by line and marked with each window's extent.
 The ↑ and ↓ buttons step through the filtered result set without leaving the
 drawer.

@@ -37,6 +37,22 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.21.0] - 2026-11-15
+
+Summary: Adopt email-reply-extractor 1.4.0 (extraction generation 8, with part boundaries) and check AI verdicts on text written in several parts by scoring each part.
+
+- Pin `email-reply-extractor` 1.4.0: extraction generation 8 (Apple Mail Share-sheet text read from the HTML part) and the part boundaries of an inline reply (`ExtractionResult.part_starts`, `CleanResult.parts`).
+- Migration 019 adds `extractions.part_starts` (JSON line indices; NULL for rows derived before boundaries were recorded) and `scores.part_check_status` (`single` / `checked`) and `scores.part_check` (JSON detail of the check).
+- Extraction, re-derivation (`staleness.reextract`) and the staleness diff record each extraction's part boundaries, including for text that did not change.
+- Part check: after each scoring run, every verdict with `fraction_ai` at or above 0.8 whose cleaned text has two or more parts has each part scored separately; parts under 50 words are merged into the next part.
+- The parts' verdicts are combined by word count and labelled by Pangram's bands (AI at `fraction_ai` >= 0.8, Human at `fraction_human` > 0.9, otherwise Mixed); when that label differs from the whole-text label it replaces the stored verdict.
+- The whole-text verdict, each part's verdict and whether the parts' verdict replaced it are kept in `scores.part_check`; `raw_response` remains the whole-text Pangram response.
+- A verdict with a single part is recorded as `single` without an API call; a cross-posted text is checked once and the check is copied to every message carrying it, including through the score cache.
+- The part check shares the run's `--limit` on texts sent, runs as a second Bulk API job under `--bulk`, and is reported in the run summary (`part_checked`, `part_replaced`, `part_single`, `part_cache_hits`, `part_failed`).
+- Message API: `score.part_check` reports a checked verdict's whole-text verdict, parts and combined verdict; `prediction_short` and `headline` follow the replacing verdict.
+- Dashboard: the message drawer's analysis card shows a "Checked by parts" section with each part's word count, AI fraction and label.
+- Export/import carries `part_starts` and the part check (absent fields in older files import as NULL); the stats export adds the `part_check` and `whole_label` columns.
+
 ## [1.20.0] - 2026-11-14
 
 Summary: Import adopts a higher extraction generation from a file whose derived data matches the target, even when the message's pipeline_version is not later.

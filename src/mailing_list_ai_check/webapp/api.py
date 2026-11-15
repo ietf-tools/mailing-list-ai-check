@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 from bisect import bisect_right
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -490,8 +490,9 @@ def _serialize_message_row(row: dict[str, Any]) -> dict[str, Any]:
             except ValueError, TypeError:
                 raw = None
         label = row["label"]
+        part_check = _part_check_json(row.get("part_check_status"), row.get("part_check"))
         prediction_short = (raw or {}).get("prediction_short")
-        if prediction_short is None:
+        if prediction_short is None or (part_check and part_check["replaced"]):
             prediction_short = label
         score = {
             "fraction_ai": row["fraction_ai"],
@@ -499,10 +500,11 @@ def _serialize_message_row(row: dict[str, Any]) -> dict[str, Any]:
             "fraction_human": row["fraction_human"],
             "label": label,
             "prediction_short": prediction_short,
-            "headline": (raw or {}).get("headline"),
+            "headline": _headline(raw, part_check),
             "windows": _window_scores(raw),
             "detector_version": row["detector_version"],
             "scored_at": row["scored_at"],
+            "part_check": part_check,
         }
     person = None
     if row["person_id"] is not None:
@@ -669,13 +671,20 @@ def message_detail(message_id: int) -> Any:
                 raw_response = json.loads(score.raw_response)
             except ValueError, TypeError:
                 raw_response = None
+        part_check = _part_check_json(score.part_check_status, score.part_check)
+        prediction_short = (raw_response or {}).get("prediction_short") or score.label
+        if part_check and part_check["replaced"]:
+            prediction_short = score.label
         score_json = {
             "fraction_ai": score.fraction_ai,
             "fraction_ai_assisted": score.fraction_ai_assisted,
             "fraction_human": score.fraction_human,
             "label": score.label,
-            "prediction_short": (raw_response or {}).get("prediction_short") or score.label,
-            "headline": (raw_response or {}).get("headline"),
+            "prediction_short": prediction_short,
+            "headline": _headline(raw_response, part_check),
+            # The part check of a verdict on text written in several parts:
+            # ``None`` unless the parts were scored (see cli.run_part_check).
+            "part_check": part_check,
             "windows": _window_details(
                 raw_response, extraction.extracted_text if extraction is not None else None
             ),
@@ -1177,6 +1186,47 @@ def staleness_rescore() -> Any:
 _NOTICE_STATES = ("pending", "later", "dismissed")
 #: The states a client may store.
 _SETTABLE_NOTICE_STATES = ("later", "dismissed")
+
+
+def _part_check_json(status: str | None, detail: str | None) -> dict[str, Any] | None:
+    """The dashboard view of a verdict's part check, or ``None``.
+
+    Only a ``'checked'`` verdict has one: the whole-text verdict, each part's
+    word count, AI fraction and label, the combined verdict, and whether that
+    combined verdict replaced the whole-text one. A ``'single'`` verdict (one
+    part, nothing to check) and an unchecked one return ``None``.
+    """
+    if status != "checked" or not detail:
+        return None
+    try:
+        data = json.loads(detail)
+    except ValueError, TypeError:
+        return None
+    return {
+        "replaced": bool(data.get("replaced")),
+        "checked_at": data.get("checked_at"),
+        "whole": data.get("whole"),
+        "combined": data.get("combined"),
+        "parts": [
+            {
+                "words": part.get("words"),
+                "fraction_ai": part.get("fraction_ai"),
+                "label": part.get("label"),
+            }
+            for part in data.get("parts") or []
+        ],
+    }
+
+
+def _headline(raw: Mapping[str, Any] | None, part_check: Mapping[str, Any] | None) -> str | None:
+    """Pangram's free-text headline, unless the part check replaced its verdict.
+
+    The headline describes the whole-text verdict; once the parts' verdict
+    replaces it, the headline would contradict the label shown beside it.
+    """
+    if part_check and part_check["replaced"]:
+        return "Verdict from scoring the parts separately"
+    return (raw or {}).get("headline")
 
 
 def _score_generation(detector_version: str | None, generation: str) -> bool:

@@ -566,6 +566,8 @@ def test_message_columns_are_the_spec_order(source, tmp_path):
         "fraction_human",
         "detector_version",
         "scored_at",
+        "part_check",
+        "whole_label",
     ]
 
 
