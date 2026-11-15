@@ -191,6 +191,7 @@ Stored per score (`scores` table, see `store.py`):
 | `raw_response` | the complete JSON response, verbatim, including `text` and `windows` |
 | `label` | derived — see below |
 | `text_sha256`, `scored_at` | computed locally |
+| `part_check_status`, `part_check` | the part check — see below; NULL until the verdict is checked |
 
 `label` is the dashboard's four-band vocabulary and is the one value this
 application invents. Because `prediction_short` never emits `AI-Assisted`,
@@ -199,10 +200,36 @@ application invents. Because `prediction_short` never emits `AI-Assisted`,
 other verdict passes `prediction_short` through unchanged. Corpus result:
 `Human` 339, `AI` 124, `Mixed` 14, `AI-Assisted` 4.
 
+### Part check
+
+An inline reply is several runs of the author's text between quoted passages,
+and the extracted text joins them. After each scoring run, every verdict with
+`fraction_ai` of 0.8 or more whose cleaned text has two or more parts is
+checked part by part (`cli.run_part_check`): parts under 50 words are merged
+into the next part, each part is scored separately, and the parts' fractions
+are combined by word count. The combined verdict is labelled with Pangram's own
+bands (`label_for_fractions`): `AI` at `fraction_ai` >= 0.8, `Human` at
+`fraction_human` > 0.9, otherwise `Mixed`.
+
+- `part_check_status` is `single` when the text has one part (no API call) and
+  `checked` once the parts were scored.
+- `part_check` (JSON) holds the whole-text verdict, each part's word count and
+  verdict, the combined verdict, and whether the combined verdict replaced the
+  whole-text one.
+- When the combined label differs from the whole-text label, the combined
+  fractions, label and detector version replace the stored ones. A replacing
+  label is therefore one of `AI`, `Human` or `Mixed`, never `AI-Assisted`.
+- `raw_response` is not changed: it remains the whole-text Pangram response,
+  and the windows read from it describe the whole text.
+
 The message-list API (`/api/messages`, `_serialize_message_row`) exposes the
 three fractions, the derived `label`, `prediction_short` and `headline` read
 back out of `raw_response`, each window's `ai_assistance_score` and
-`confidence`, `detector_version` and `scored_at`.
+`confidence`, `detector_version`, `scored_at` and `part_check` (null unless the
+verdict's status is `checked`). For a verdict the part check replaced,
+`prediction_short` is the stored `label` and `headline` is the fixed text
+"Verdict from scoring the parts separately", since Pangram's own values describe
+the whole-text verdict.
 
 The detail API (`/api/messages/<id>`) adds, per window, its `label`, `chars`,
 `word_count` and where it sits in the extracted text: `start` and `end` are
@@ -223,7 +250,7 @@ Dashboard use:
 | ANALYSIS text | `headline`, verbatim and uncoloured |
 | AI SCORE (CONFIDENCE) column | every window's `ai_assistance_score` at two decimal places with its `confidence` abbreviated to H / M / L; hover gives the window count and the full list |
 | Label filters, aggregate bars, flagged counts | the derived four-band `label` (aggregate bars fold `AI-Assisted` back into `Mixed`) |
-| Detail drawer analysis card | `prediction_short`, `headline`, `detector_version`, and a table of every window's chars, score, confidence and label |
+| Detail drawer analysis card | `prediction_short`, `headline`, `detector_version`, a "Checked by parts" section with each part's word count, AI fraction and label when the verdict was checked, and a table of every window's chars, score, confidence and label |
 | Detail drawer text | a numbered marker at each window's first character and a bracket spanning its lines, both hovering to that window's row |
 
 Two gates are this application's, not Pangram's: the 50-word "too short to

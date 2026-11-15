@@ -552,7 +552,9 @@ def build_extract_parser() -> argparse.ArgumentParser:
         description=(
             "Extract each author's newly written text from stored messages "
             "(the email-reply-extractor library). Idempotent: only messages "
-            "without an extraction row are processed."
+            "without an extraction row are processed, after first re-deriving "
+            "the extracted replies whose thread parent has been stored since "
+            "the previous check."
         ),
     )
     parser.add_argument("--db", metavar="PATH", help="override the database path")
@@ -720,7 +722,12 @@ def build_score_parser() -> argparse.ArgumentParser:
             "sign-offs and signatures removed); extractions whose cleaned text is "
             "under the 50-word reliability floor are marked 'too_short' and never "
             "sent; identical cleaned text is served from the score cache without an "
-            "API call. Idempotent."
+            "API call. Idempotent. Unless --dry-run is given, the run first "
+            "re-derives the extracted replies whose thread parent has been stored "
+            "since the previous check. After scoring, each AI verdict on text "
+            "written in several parts is checked by scoring each part separately; "
+            "the parts' combined label replaces the whole-text label when the two "
+            "differ."
         ),
     )
     parser.add_argument("--db", metavar="PATH", help="override the database path")
@@ -730,8 +737,9 @@ def build_score_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SCORE_LIMIT,
         metavar="N",
         help=(
-            f"cap on Pangram API calls this run (cache hits are free and uncapped); "
-            f"default {DEFAULT_SCORE_LIMIT}. Pass a larger value for production runs."
+            f"cap on Pangram API calls this run, part-check texts included (cache "
+            f"hits are free and uncapped); default {DEFAULT_SCORE_LIMIT}. Pass a "
+            f"larger value for production runs."
         ),
     )
     parser.add_argument(
@@ -751,7 +759,8 @@ def build_score_parser() -> argparse.ArgumentParser:
         help=(
             "submit this run's texts as a single Pangram Bulk API job instead of "
             "one realtime call per text; bulk words are billed at a 20%% discount, "
-            "which suits large catch-up runs. --limit still caps the texts submitted."
+            "which suits large catch-up runs. --limit still caps the texts submitted. "
+            "The part check's texts are sent as a second Bulk API job."
         ),
     )
     parser.add_argument(

@@ -241,7 +241,10 @@ under 50 words are merged into the next), the parts' verdicts are combined by
 word count, and when the combined label differs from the whole-text label it
 replaces the stored verdict. The check is recorded on the verdict and shown in
 the message drawer. Its part texts count towards `--limit`, and under `--bulk`
-they are sent as a second Bulk API job.
+they are sent as a second Bulk API job. The check needs the part boundaries an
+extraction records from v1.21.0 on; an extraction derived earlier is checked
+once it is re-derived (see "Re-processing text derived by an older extraction
+routine").
 
 The detector can be changed for one run with `--model {pangram-4,default}`
 (`default` routes to Pangram 3 until Pangram deprecates it), or persistently
@@ -391,10 +394,12 @@ affected messages:
   Extractions that come out identical are stamped with the running routine's
   number, so the prompt does not reappear for them.
 - **Run process ($)** re-extracts the listed messages and re-scores them. A
-  message keeps its stored score unless the *scored* text changed, since only
-  then was the verdict reached on text that no longer exists; each message that
-  does need a new verdict is one paid Pangram call unless its new text is already
-  in the score cache. Both stages report their counts as they run.
+  message keeps its stored score unless the *scored* text changed in substance,
+  since only then was the verdict reached on text that no longer exists; when
+  the scored text moved only in whitespace the score is kept and re-keyed to the
+  new text. Each message that does need a new verdict is one paid Pangram call
+  unless its new text is already in the score cache. Both stages report their
+  counts as they run.
 - **Not now** leaves everything untouched. An alert icon then sits beside the ⓘ
   button for as long as any extraction predates the running routine; it reopens
   the same prompt.
@@ -509,7 +514,10 @@ file (the message body itself is never overwritten). Each exported extraction
 also carries the version of the extraction routine that produced its text, and an
 imported extraction keeps that number rather than being credited to the importing
 build; for files written before the field existed it is inferred from the app
-version in the file.
+version in the file. When the target's extraction and score already equal the
+file's, a higher extraction number in the file is adopted even if the file's app
+version is not later, so a copy of a store that has been re-checked against a
+newer routine does not read as out of date.
 
 Export and import are also available from the dashboard's **Messages** pane, via
 its Export and Import buttons. Export opens a dialog for choosing the lists —

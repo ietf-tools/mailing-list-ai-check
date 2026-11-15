@@ -37,6 +37,17 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.21.1] - 2026-11-15
+
+Summary: Bring the in-app documentation and the CLI help up to date with the parent-arrival check, substance-gated rescoring, import generation adoption and the part check.
+
+- `docs/pangram-output.md` documents the part check: the `part_check_status` and `part_check` columns, which stored values a replacing verdict changes, and the API's `prediction_short` and `headline` for a replaced verdict.
+- README: the stale-data "Run process ($)" description states that a score is deleted only when the scored text changed in substance and is kept on a whitespace-only change.
+- README: the part check paragraph states that an extraction derived before v1.21.0 is checked once it is re-derived.
+- README: the import description covers adopting a file's higher extraction generation when the derived data already matches.
+- `mail-ai-extract --help` states that already-extracted replies whose parent has since been stored are re-derived first.
+- `mail-ai-score --help` describes the parent-arrival check and the part check, and states that part-check texts count towards `--limit` and are sent as a second job under `--bulk`.
+
 ## [1.21.0] - 2026-11-15
 
 Summary: Adopt email-reply-extractor 1.4.0 (extraction generation 8, with part boundaries) and check AI verdicts on text written in several parts by scoring each part.
