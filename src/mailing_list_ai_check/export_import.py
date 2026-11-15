@@ -169,8 +169,11 @@ class ImportSummary:
     derived state already matched a later-version file, so only version stamps
     moved — the message's ``pipeline_version`` and, when the file's generation is
     higher, the extraction's ``extraction_version`` (no other message column is
-    ever modified). ``dry_run`` is true when the run rolled back instead of
-    committing.
+    ever modified). ``generations_advanced`` counts skipped messages whose
+    ``pipeline_version`` was *not* later but whose derived state matched a file
+    of a higher extraction generation, so only the extraction's
+    ``extraction_version`` moved. ``dry_run`` is true when the run rolled back
+    instead of committing.
     """
 
     lists_created: int = 0
@@ -186,6 +189,7 @@ class ImportSummary:
     extractions_updated: int = 0
     scores_updated: int = 0
     versions_bumped: int = 0
+    generations_advanced: int = 0
     dry_run: bool = False
 
     def as_line(self) -> str:
@@ -198,6 +202,7 @@ class ImportSummary:
             f"extractions_inserted={self.extractions_inserted} scores_inserted={self.scores_inserted} "
             f"extractions_updated={self.extractions_updated} scores_updated={self.scores_updated} "
             f"versions_bumped={self.versions_bumped} "
+            f"generations_advanced={self.generations_advanced} "
             f"dry_run={self.dry_run}"
         )
 
@@ -708,6 +713,7 @@ class _Importer:
         self.extractions_updated = 0
         self.scores_updated = 0
         self.versions_bumped = 0
+        self.generations_advanced = 0
 
     # -- dispatch -------------------------------------------------------------
 
@@ -939,6 +945,15 @@ class _Importer:
                     self._refresh_derived(
                         existing["id"], extraction, raw_body, file_version, lineno
                     )
+            elif extraction is not None and self._derived_matches(existing["id"], extraction):
+                # Same (or earlier) pipeline_version, identical derived data. The
+                # staleness check re-stamps an unchanged extraction's generation
+                # without touching messages.pipeline_version, so a copy of a
+                # re-checked store carries a higher generation under an equal
+                # pipeline_version. Adopt that generation (a maximum) and nothing
+                # else: the message row and the extraction's provenance stay put.
+                if self._advance_generation(existing["id"], extraction, file_version):
+                    self.generations_advanced += 1
             return
 
         self.messages_inserted += 1
@@ -1097,33 +1112,35 @@ class _Importer:
 
     def _advance_generation(
         self, message_pk: int, extraction: dict[str, Any] | None, file_version: str | None
-    ) -> None:
+    ) -> bool:
         """Raise the target extraction's generation to the file's, never lower it.
 
-        Only reached from the version-bump branch, where :meth:`_derived_matches`
-        has already established that the file's text hash, method, status and
-        character count equal the target's — so a file of a later generation has
-        demonstrated that its routine produces exactly the text the target holds,
-        and the target's stamp can adopt it without re-deriving anything. The
-        write is a maximum, so a file of an *earlier* generation (or one whose
-        generation is unknown) leaves the stamp alone; ``extractions.pipeline_version``
-        is provenance of the row as written and is not touched here.
+        Returns whether the stamp moved. Only reached after :meth:`_derived_matches`
+        has established that the file's text hash, method, status and character
+        count equal the target's — so a file of a later generation has demonstrated
+        that its routine produces exactly the text the target holds, and the
+        target's stamp can adopt it without re-deriving anything. The write is a
+        maximum, so a file of an *earlier* generation (or one whose generation is
+        unknown) leaves the stamp alone; ``extractions.pipeline_version`` is
+        provenance of the row as written and is not touched here.
         """
         if extraction is None:
-            return
+            return False
         generation = _file_generation(extraction, file_version)
         if generation is None:
-            return
+            return False
         target = self.conn.execute(
             "SELECT id, extraction_version FROM extractions WHERE message_id = ?", (message_pk,)
         ).fetchone()
         if target is None:  # pragma: no cover - _derived_matches saw a row
-            return
-        if (target["extraction_version"] or 0) < generation:
-            self.conn.execute(
-                "UPDATE extractions SET extraction_version = ? WHERE id = ?",
-                (generation, target["id"]),
-            )
+            return False
+        if (target["extraction_version"] or 0) >= generation:
+            return False
+        self.conn.execute(
+            "UPDATE extractions SET extraction_version = ? WHERE id = ?",
+            (generation, target["id"]),
+        )
+        return True
 
     def _refresh_derived(
         self,
@@ -1200,6 +1217,7 @@ class _Importer:
             extractions_updated=self.extractions_updated,
             scores_updated=self.scores_updated,
             versions_bumped=self.versions_bumped,
+            generations_advanced=self.generations_advanced,
             dry_run=dry_run,
         )
 

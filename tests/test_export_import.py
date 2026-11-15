@@ -1546,6 +1546,112 @@ def test_import_version_bump_with_no_extraction_on_either_side(target, tmp_path)
     assert _messages_by_key(target)[(VF, VMID)]["pipeline_version"] == "2.0.0"
 
 
+def test_import_equal_version_identical_data_adopts_the_higher_generation(target, tmp_path):
+    """A copy of a store whose staleness check re-stamped unchanged extractions.
+
+    The check raises ``extraction_version`` without touching the message's
+    ``pipeline_version``, so the file carries a higher generation under an equal
+    ``pipeline_version``. Identical derived data adopts the generation; nothing
+    else moves.
+    """
+    common = dict(extracted_text=TEXT_A, method="reply_parser", score=V_SCORE_A)
+    _seed_versioned(target, pipeline_version="1.8.0", extraction_version=4, **common)
+    out = _versioned_file(
+        tmp_path, "equalgen.jsonl", pipeline_version="1.8.0", extraction_version=6, **common
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_advanced == 1
+    assert summary.versions_bumped == 0
+    assert summary.extractions_updated == 0
+    assert summary.scores_updated == 0
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 6)
+    assert _messages_by_key(target)[(VF, VMID)]["pipeline_version"] == "1.8.0"
+    assert _scores_by_key(target)[(VF, VMID)]["text_sha256"] == V_SCORE_A["text_sha256"]
+
+
+def test_import_earlier_version_identical_data_adopts_the_higher_generation(target, tmp_path):
+    """An earlier ``pipeline_version`` still proves the text when the data matches."""
+    common = dict(extracted_text=TEXT_A, method="reply_parser")
+    _seed_versioned(target, pipeline_version="2.0.0", extraction_version=4, **common)
+    out = _versioned_file(
+        tmp_path, "earliergen.jsonl", pipeline_version="1.0.0", extraction_version=6, **common
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_advanced == 1
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("2.0.0", 6)
+    assert _messages_by_key(target)[(VF, VMID)]["pipeline_version"] == "2.0.0"
+
+
+def test_import_equal_version_differing_text_keeps_the_target_generation(target, tmp_path):
+    """Differing text under an equal ``pipeline_version`` proves nothing: no stamp moves
+    and the target's derived data is left as it is."""
+    _seed_versioned(target, pipeline_version="1.8.0", extraction_version=4, extracted_text=TEXT_A)
+    out = _versioned_file(
+        tmp_path,
+        "equaldiff.jsonl",
+        pipeline_version="1.8.0",
+        extraction_version=6,
+        extracted_text=TEXT_B,
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_advanced == 0
+    assert summary.extractions_updated == 0
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 4)
+    assert _extractions_by_key(target)[(VF, VMID)]["extracted_text"] == TEXT_A
+
+
+def test_import_equal_version_differing_score_keeps_the_target_generation(target, tmp_path):
+    """The match covers the score too, as in the version-bump branch."""
+    _seed_versioned(
+        target,
+        pipeline_version="1.8.0",
+        extraction_version=4,
+        extracted_text=TEXT_A,
+        score=V_SCORE_A,
+    )
+    out = _versioned_file(
+        tmp_path,
+        "equalscore.jsonl",
+        pipeline_version="1.8.0",
+        extraction_version=6,
+        extracted_text=TEXT_A,
+        score=None,
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_advanced == 0
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 4)
+
+
+def test_import_equal_version_never_regresses_the_generation(target, tmp_path):
+    """A file of a lower generation leaves the target's stamp alone and counts nothing."""
+    common = dict(extracted_text=TEXT_A, method="reply_parser")
+    _seed_versioned(target, pipeline_version="1.8.0", extraction_version=6, **common)
+    out = _versioned_file(
+        tmp_path, "equallower.jsonl", pipeline_version="1.8.0", extraction_version=4, **common
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_advanced == 0
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 6)
+
+
+def test_import_equal_version_generation_adoption_rolls_back_on_dry_run(target, tmp_path):
+    """A dry run reports the adoption but writes nothing."""
+    common = dict(extracted_text=TEXT_A, method="reply_parser")
+    _seed_versioned(target, pipeline_version="1.8.0", extraction_version=4, **common)
+    out = _versioned_file(
+        tmp_path, "equaldry.jsonl", pipeline_version="1.8.0", extraction_version=6, **common
+    )
+
+    summary = export_import.import_file(target, out, dry_run=True)
+    assert summary.generations_advanced == 1
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 4)
+
+
 # ==============================================================================
 # IMPORT -- error handling (all raise ExportImportError, all roll back)
 # ==============================================================================

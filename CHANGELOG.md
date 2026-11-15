@@ -37,6 +37,13 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.20.0] - 2026-11-14
+
+Summary: Import adopts a higher extraction generation from a file whose derived data matches the target, even when the message's pipeline_version is not later.
+
+- Import: an existing message whose extraction and score equal the file's, under an equal or earlier `pipeline_version`, has its `extractions.extraction_version` raised to the file's generation (a maximum; no other column changes); counted as the new `generations_advanced` summary field.
+- Fixes a copy of a store that had been re-checked by the staleness check (which re-stamps unchanged extractions without moving `messages.pipeline_version`) reading as stale on the target.
+
 ## [1.19.0] - 2026-11-14
 
 Summary: Extraction generation 7 via email-reply-extractor v1.3.0, whose parent-diff runs in time linear in its input and aligns on the longest common run of lines.

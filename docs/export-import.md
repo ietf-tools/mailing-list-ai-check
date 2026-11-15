@@ -125,8 +125,15 @@ applies). But its derived data may now be refreshed:
 
 1. Compare the file message's `pipeline_version` with the target row's
    (tuple comparison, NULL oldest).
-2. If the file's version is **not later**, behave exactly as before: skip the
-   message and its embedded extraction/score (`messages_skipped`).
+2. If the file's version is **not later**, skip the message and its embedded
+   extraction/score (`messages_skipped`). One stamp may still move: when the
+   derived data is equal (the same comparison as step 3) and the file
+   record's `extraction_version` is higher than the target extraction's, the
+   target's `extraction_version` is raised to it (counted as
+   `generations_advanced`). The staleness check re-stamps an unchanged
+   extraction's generation without moving the message's `pipeline_version`,
+   so a copy of a re-checked store carries a higher generation under an equal
+   `pipeline_version`. No other column changes.
 3. If the file's version **is later**, compare derived data:
    - extraction equality: `sha256` of the text, `method`, `status`,
      `char_count`;
@@ -151,7 +158,8 @@ applies). But its derived data may now be refreshed:
    `messages_skipped` — its own row was not inserted).
 
 `ImportSummary` gains `extractions_updated: int = 0`,
-`scores_updated: int = 0` and `versions_bumped: int = 0`.
+`scores_updated: int = 0`, `versions_bumped: int = 0` and
+`generations_advanced: int = 0`.
 
 ### Version stamps on an imported extraction
 
@@ -444,6 +452,7 @@ class ImportSummary:
     extractions_updated: int = 0
     scores_updated: int = 0
     versions_bumped: int = 0
+    generations_advanced: int = 0
     dry_run: bool = False
 
     def as_line(self) -> str: ...

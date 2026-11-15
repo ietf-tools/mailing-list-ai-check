@@ -83,7 +83,7 @@ them, and what depends on them.
 ## Versioning
 
 The app uses [semantic versioning](https://semver.org/); the current version is
-**1.19.0**. The single source of truth is `mailing_list_ai_check.__version__`
+**1.20.0**. The single source of truth is `mailing_list_ai_check.__version__`
 (in `__init__.py`); `pyproject.toml` reads it dynamically, so the two never
 drift.
 
