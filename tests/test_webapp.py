@@ -425,6 +425,30 @@ def test_window_details_positions_windows_in_the_extracted_text():
     assert second["humanizer_score"] == 0.87
 
 
+def test_window_details_locates_windows_in_indented_lines():
+    # Scoring strips each line at both ends, so an indented extracted line (a
+    # quoted draft section, say) is analysed without its indent. The window must
+    # still be located, with the column shifted back past the indent.
+    extracted = "Proposed text:\n\n   Operators should ensure\n   rate limiting.\n\nThanks"
+    analysed = "Proposed text:\nOperators should ensure\nrate limiting.\nThanks"
+    raw = {
+        "text": analysed,
+        "windows": [
+            {
+                "text": "Operators should ensure\nrate limiting.",
+                "start_index": 15,
+                "end_index": 53,
+                "label": "AI-Generated",
+                "ai_assistance_score": 0.95,
+                "confidence": "High",
+            },
+        ],
+    }
+    (window,) = webapp_api._window_details(raw, extracted)
+    assert window["start"] == {"line": 2, "col": 3}
+    assert window["end"] == {"line": 3, "col": 17}
+
+
 def test_window_details_reports_scores_when_a_window_cannot_be_located():
     # A message re-extracted after it was scored no longer contains the analysed
     # lines. The window is still reported, without a position.

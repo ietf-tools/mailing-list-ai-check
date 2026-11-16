@@ -37,6 +37,10 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.22.1] - 2026-11-16
+Summary: Locate per-window markers on indented lines of the message detail.
+- Window start and end markers are placed on indented extracted lines, which scoring analyses without their indent; such windows were previously reported without a position.
+
 ## [1.22.0] - 2026-11-16
 
 Summary: Adopt extraction generation 9 from email-reply-extractor 1.5.0; store the current method label when a re-derivation leaves an extraction's text unchanged.

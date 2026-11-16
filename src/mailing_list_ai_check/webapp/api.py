@@ -366,9 +366,10 @@ def _analysed_to_extracted_lines(analysed: list[str], extracted: list[str]) -> l
     """Line-for-line map from the analysed text back to ``extracted_text``.
 
     Scoring sends ``clean_for_scoring(extracted_text)`` — the extracted text
-    minus its furniture lines, each survivor rstripped — so window offsets index
-    a text whose lines are a subsequence of the extracted ones. Walk both in
-    order, matching on the rstripped line, and return the extracted-line index
+    minus its furniture lines, each survivor stripped at both ends — so window
+    offsets index a text whose lines are a subsequence of the extracted ones.
+    Walk both in order, matching on the stripped line (an indented extracted
+    line is scored without its indent), and return the extracted-line index
     for each analysed line (``None`` where no match is found, e.g. because the
     message was re-extracted after it was scored).
 
@@ -378,13 +379,13 @@ def _analysed_to_extracted_lines(analysed: list[str], extracted: list[str]) -> l
     out: list[int | None] = []
     next_ext = 0
     for line in analysed:
-        key = line.rstrip()
+        key = line.strip()
         if not key:
             out.append(None)
             continue
         found = None
         for idx in range(next_ext, len(extracted)):
-            if extracted[idx].rstrip() == key:
+            if extracted[idx].strip() == key:
                 found = idx
                 break
         out.append(found)
@@ -414,6 +415,7 @@ def _window_details(raw: dict[str, Any] | None, extracted_text: str | None) -> l
     ext_lines = (extracted_text or "").split("\n")
     line_map: list[int | None] = []
     starts: list[int] = []
+    analysed_lines: list[str] = []
     if isinstance(analysed, str):
         analysed_lines = analysed.split("\n")
         line_map = _analysed_to_extracted_lines(analysed_lines, ext_lines)
@@ -433,8 +435,14 @@ def _window_details(raw: dict[str, Any] | None, extracted_text: str | None) -> l
         ext_line = line_map[idx]
         if ext_line is None:
             return None
-        col = offset - starts[idx]
-        return {"line": ext_line, "col": max(0, min(col, len(ext_lines[ext_line])))}
+        # Scoring strips each line's indent; add it back so the column lands on
+        # the same character in the extracted line.
+        ext_text = ext_lines[ext_line]
+        indent = (len(ext_text) - len(ext_text.lstrip())) - (
+            len(analysed_lines[idx]) - len(analysed_lines[idx].lstrip())
+        )
+        col = offset - starts[idx] + indent
+        return {"line": ext_line, "col": max(0, min(col, len(ext_text)))}
 
     out: list[dict[str, Any]] = []
     for i, window in enumerate(windows):
