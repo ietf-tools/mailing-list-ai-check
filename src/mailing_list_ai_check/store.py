@@ -1977,6 +1977,20 @@ class Store:
         self.conn.commit()
         return True
 
+    def set_method(self, extraction_id: int, method: str) -> bool:
+        """Store an extraction's method label; return whether it changed.
+
+        Used when a re-derivation keeps the text but reaches it by a different
+        path (a later routine can produce the same text through other rules),
+        so the label names the path the current routine takes.
+        """
+        cur = self.conn.execute(
+            "UPDATE extractions SET method = ? WHERE id = ? AND method != ?",
+            (method, extraction_id, method),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def set_extraction_version(
         self,
         extraction_id: int,

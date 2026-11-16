@@ -392,7 +392,8 @@ affected messages:
   total, showing the character counts before and after and what moved (the
   extracted text, the text that gets scored, or the extraction status).
   Extractions that come out identical are stamped with the running routine's
-  number, so the prompt does not reappear for them.
+  number, so the prompt does not reappear for them, and their method label is
+  set to the one the running routine reports.
 - **Run process ($)** re-extracts the listed messages and re-scores them. A
   message keeps its stored score unless the *scored* text changed in substance,
   since only then was the verdict reached on text that no longer exists; when

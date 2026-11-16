@@ -83,7 +83,7 @@ them, and what depends on them.
 ## Versioning
 
 The app uses [semantic versioning](https://semver.org/); the current version is
-**1.21.1**. The single source of truth is `mailing_list_ai_check.__version__`
+**1.22.0**. The single source of truth is `mailing_list_ai_check.__version__`
 (in `__init__.py`); `pyproject.toml` reads it dynamically, so the two never
 drift.
 
@@ -121,7 +121,7 @@ repo:
   bump when the new library release changed extraction output (its
   `EXTRACTION_VERSION` moved — stored data is affected on re-extraction), and a
   **patch** bump otherwise.
-- Eight generations exist: **1** (initial release), **2** (from v1.2.0), **3**
+- Nine generations exist: **1** (initial release), **2** (from v1.2.0), **3**
   (from v1.11.0) and **4** (from v1.15.0) were produced in this codebase before
   the library was extracted; **5** shipped in the library's v1.1.0 (fragment
   edges kept, Outlook-boundary fix uncapped), first pinned by app v1.16.0;
@@ -133,7 +133,11 @@ repo:
   linear-time parent-diff, literal attribution-header collapse), first pinned
   by app v1.19.0; **8** shipped in the library's v1.4.0 (Apple Mail
   Share-sheet text read from the HTML part; the release also added part
-  boundaries, see "Part check" below), first pinned by app v1.21.0.
+  boundaries, see "Part check" below), first pinned by app v1.21.0; **9**
+  shipped in the library's v1.5.0 (the parent-diff assist keeps a line the
+  author repeats from the thread parent when the message also carries it
+  inside its own marked quotation and its block is mostly unmatched text),
+  first pinned by app v1.22.0.
 - Re-derivation deletes a score only when the cleaned text changed **in
   substance** (`email_reply_extractor.texts_equivalent`); a whitespace-only
   movement keeps the verdict, re-keyed to the new text's hash (see

@@ -37,6 +37,15 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.22.0] - 2026-11-16
+
+Summary: Adopt extraction generation 9 from email-reply-extractor 1.5.0; store the current method label when a re-derivation leaves an extraction's text unchanged.
+
+- Pin `email-reply-extractor` 1.5.0, whose `EXTRACTION_VERSION` is 9: the parent-diff assist keeps a matched run of lines that the message also carries inside its own marked quotation, when the run's block of consecutive non-blank lines is mostly unmatched text.
+- Stored extractions of generation 8 are reported as out of date until re-derived; a reply that repeats lines of its thread parent above a marked quotation regains those lines.
+- `staleness.reextract` and `staleness.diff` write the re-derived `method` to an extraction whose text is unchanged; previously the row was stamped with the running generation while keeping the label written by an earlier routine.
+- New `Store.set_method` updates an extraction's method label and reports whether it changed.
+
 ## [1.21.1] - 2026-11-15
 
 Summary: Bring the in-app documentation and the CLI help up to date with the parent-arrival check, substance-gated rescoring, import generation adoption and the part check.

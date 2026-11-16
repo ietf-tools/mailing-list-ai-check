@@ -280,10 +280,10 @@ def diff(store: Store) -> DiffReport:
     Walks every message that has an extraction, re-runs extraction and cleaning
     (:func:`_rederive`), and compares both the extracted and the cleaned text
     against what is stored. Rows that match are stamped with the running
-    generation, with their part boundaries, and counted in ``unchanged``; the
-    rest are returned in ``differing``, ordered by message id. The only writes
-    are that stamp and those boundaries: no text is rewritten, no verdict is
-    changed, and Pangram is never called.
+    generation, with their part boundaries and method label, and counted in
+    ``unchanged``; the rest are returned in ``differing``, ordered by message
+    id. The only writes are that stamp, those boundaries and that label: no
+    text is rewritten, no verdict is changed, and Pangram is never called.
     """
     differing: list[ExtractionDiff] = []
     checked = unchanged = stamped = 0
@@ -302,8 +302,9 @@ def diff(store: Store) -> DiffReport:
                 store.set_extraction_version(extraction.id)
                 stamped += 1
             # Stamped current, the row is never re-derived again, so its part
-            # boundaries are stored now.
+            # boundaries and its method label are stored now.
             store.set_part_starts(extraction.id, rederived.part_starts)
+            store.set_method(extraction.id, rederived.method)
             continue
 
         mailing_list = store.get_list(message.list_id)
@@ -345,7 +346,8 @@ def reextract(store: Store, message_ids: Sequence[int]) -> ReextractSummary:
     For each message with an extraction row: re-derive it, and
 
     - if neither the extracted nor the cleaned text changed, only stamp the
-      generation and store the part boundaries (counted in ``unchanged``);
+      generation and store the part boundaries and the method label (counted
+      in ``unchanged``);
     - otherwise rewrite the extraction in place
       (:meth:`~mailing_list_ai_check.store.Store.replace_extraction`). A score
       is deleted only when the cleaned text changed **in substance**
@@ -373,8 +375,10 @@ def reextract(store: Store, message_ids: Sequence[int]) -> ReextractSummary:
             if extraction.extraction_version != EXTRACTION_VERSION:
                 store.set_extraction_version(extraction.id)
             # The text stands, but its part boundaries may be new (a row derived
-            # before they were recorded) or moved.
+            # before they were recorded) or moved, and the routine may now reach
+            # the same text by a different path.
             store.set_part_starts(extraction.id, rederived.part_starts)
+            store.set_method(extraction.id, rederived.method)
             continue
 
         store.replace_extraction(
