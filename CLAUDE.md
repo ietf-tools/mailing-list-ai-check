@@ -83,7 +83,7 @@ them, and what depends on them.
 ## Versioning
 
 The app uses [semantic versioning](https://semver.org/); the current version is
-**1.18.0**. The single source of truth is `mailing_list_ai_check.__version__`
+**1.22.1**. The single source of truth is `mailing_list_ai_check.__version__`
 (in `__init__.py`); `pyproject.toml` reads it dynamically, so the two never
 drift.
 
@@ -121,14 +121,23 @@ repo:
   bump when the new library release changed extraction output (its
   `EXTRACTION_VERSION` moved — stored data is affected on re-extraction), and a
   **patch** bump otherwise.
-- Six generations exist: **1** (initial release), **2** (from v1.2.0), **3**
+- Nine generations exist: **1** (initial release), **2** (from v1.2.0), **3**
   (from v1.11.0) and **4** (from v1.15.0) were produced in this codebase before
   the library was extracted; **5** shipped in the library's v1.1.0 (fragment
   edges kept, Outlook-boundary fix uncapped), first pinned by app v1.16.0;
   **6** shipped in the library's v1.2.0 (localized Outlook quote-header blocks
   and original-message dividers for French, German, Spanish, Italian,
   Portuguese and Dutch, with an inline-reply guard), first pinned by app
-  v1.17.0.
+  v1.17.0; **7** shipped in the library's v1.3.0 (parent-diff alignment around
+  the longest common run of lines in place of `difflib.SequenceMatcher`,
+  linear-time parent-diff, literal attribution-header collapse), first pinned
+  by app v1.19.0; **8** shipped in the library's v1.4.0 (Apple Mail
+  Share-sheet text read from the HTML part; the release also added part
+  boundaries, see "Part check" below), first pinned by app v1.21.0; **9**
+  shipped in the library's v1.5.0 (the parent-diff assist keeps a line the
+  author repeats from the thread parent when the message also carries it
+  inside its own marked quotation and its block is mostly unmatched text),
+  first pinned by app v1.22.0.
 - Re-derivation deletes a score only when the cleaned text changed **in
   substance** (`email_reply_extractor.texts_equivalent`); a whitespace-only
   movement keeps the verdict, re-keyed to the new text's hash (see
@@ -168,6 +177,31 @@ and `staleness.check()` does not see that (it compares generations only).
   work, because the check reads the table. A new code path that derives
   extraction text must resolve the parent the same way (`get_parent_body` with
   `exclude_message_id`).
+
+## Part check
+
+An inline reply is several runs of the author's text between quoted passages;
+extraction joins them, and Pangram can rate the joined text differently from
+each run alone. `cli.run_part_check` (called at the end of every `run_score`)
+re-checks such verdicts.
+
+- Trigger: `scores.fraction_ai >= 0.8` (`PART_CHECK_MIN_FRACTION_AI`, the lower
+  edge of Pangram's AI label), `part_check_status IS NULL`, and an `ok`
+  extraction with recorded `part_starts`.
+- Parts: `clean_for_scoring(..., part_starts=...).parts`, then
+  `merge_short_parts` joins parts under 50 words to the next one. Fewer than
+  two parts → status `single`, no API call.
+- Verdict: each part scored, fractions combined by word count, labelled by
+  `label_for_fractions` (AI at `fraction_ai >= 0.8`, Human at
+  `fraction_human > 0.9`, else Mixed — Pangram's own bands, verified over every
+  stored verdict). A label that differs from the whole-text label **replaces**
+  the stored verdict; there is no "disputed" state. Status `checked` either
+  way, with the whole-text verdict and the parts kept in `scores.part_check`.
+- The check shares the run's `--limit`; cross-posts are checked once and the
+  check is copied (also through the score cache).
+- `extractions.part_starts` NULL means the row predates boundaries; a
+  re-derivation fills it. Any code path that writes extraction text must
+  also write `part_starts`.
 
 ## Changelog — maintain it
 

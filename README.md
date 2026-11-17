@@ -235,6 +235,18 @@ it, and `--limit` caps the texts submitted. Bulk suits large catch-up runs; for
 a handful of new messages the realtime default is simpler and faster. Texts a
 bulk job fails to score stay queued and are retried on the next run.
 
+After the verdicts are stored, each run checks the AI verdicts (`fraction_ai`
+of 0.8 or more) of text written in several parts — an inline reply whose
+answers sit between quoted passages. Each part is scored separately (parts
+under 50 words are merged into the next), the parts' verdicts are combined by
+word count, and when the combined label differs from the whole-text label it
+replaces the stored verdict. The check is recorded on the verdict and shown in
+the message drawer. Its part texts count towards `--limit`, and under `--bulk`
+they are sent as a second Bulk API job. The check needs the part boundaries an
+extraction records from v1.21.0 on; an extraction derived earlier is checked
+once it is re-derived (see "Re-processing text derived by an older extraction
+routine").
+
 The detector can be changed for one run with `--model {pangram-4,default}`
 (`default` routes to Pangram 3 until Pangram deprecates it), or persistently
 with the dashboard's "Use Pangram v3 (old)" header switch, which applies to
@@ -298,7 +310,8 @@ sender's replies point at, and other senders' replies to this sender.
 
 The message drawer, opened from any row and deep-linked at `/messages/<id>`,
 shows the message metadata and reply-timing band, the analysis card (the Pangram
-prediction, headline, detector version, and one row per scored window), and the
+prediction, headline, detector version, the part check when the verdict was
+checked part by part, and one row per scored window), and the
 text that was analyzed, numbered by line and marked with each window's extent.
 The ↑ and ↓ buttons step through the filtered result set without leaving the
 drawer.
@@ -380,12 +393,15 @@ affected messages:
   total, showing the character counts before and after and what moved (the
   extracted text, the text that gets scored, or the extraction status).
   Extractions that come out identical are stamped with the running routine's
-  number, so the prompt does not reappear for them.
+  number, so the prompt does not reappear for them, and their method label is
+  set to the one the running routine reports.
 - **Run process ($)** re-extracts the listed messages and re-scores them. A
-  message keeps its stored score unless the *scored* text changed, since only
-  then was the verdict reached on text that no longer exists; each message that
-  does need a new verdict is one paid Pangram call unless its new text is already
-  in the score cache. Both stages report their counts as they run.
+  message keeps its stored score unless the *scored* text changed in substance,
+  since only then was the verdict reached on text that no longer exists; when
+  the scored text moved only in whitespace the score is kept and re-keyed to the
+  new text. Each message that does need a new verdict is one paid Pangram call
+  unless its new text is already in the score cache. Both stages report their
+  counts as they run.
 - **Not now** leaves everything untouched. An alert icon then sits beside the ⓘ
   button for as long as any extraction predates the running routine; it reopens
   the same prompt.
@@ -500,7 +516,10 @@ file (the message body itself is never overwritten). Each exported extraction
 also carries the version of the extraction routine that produced its text, and an
 imported extraction keeps that number rather than being credited to the importing
 build; for files written before the field existed it is inferred from the app
-version in the file.
+version in the file. When the target's extraction and score already equal the
+file's, a higher extraction number in the file is adopted even if the file's app
+version is not later, so a copy of a store that has been re-checked against a
+newer routine does not read as out of date.
 
 Export and import are also available from the dashboard's **Messages** pane, via
 its Export and Import buttons. Export opens a dialog for choosing the lists —

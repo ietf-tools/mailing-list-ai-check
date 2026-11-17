@@ -55,6 +55,7 @@ from . import __version__
 from .export_import import _range_clause, _range_params, _select_lists
 from .store import (
     EXTRACTION_STATUSES,
+    PART_CHECK_STATUSES,
     TIMING_IMPLAUSIBLE_CPM,
     TIMING_SUSPICIOUS_CPM,
     Store,
@@ -240,6 +241,20 @@ _MESSAGE_COLUMNS = (
     _Column(
         "scored_at", "datetime", "when the score was written, UTC ISO-8601; empty when unscored"
     ),
+    _Column(
+        "part_check",
+        "string",
+        "`checked` when the verdict's text was scored part by part, `single` when the "
+        "part check found one part; empty when not looked at",
+        {"enum": list(PART_CHECK_STATUSES)},
+    ),
+    _Column(
+        "whole_label",
+        "string",
+        "for a `checked` verdict, the label of the text scored as one text; `label` "
+        "holds the parts' verdict when the two differ; empty otherwise",
+        {"enum": list(LABELS)},
+    ),
 )
 
 #: ``lists.csv`` columns in file order.
@@ -298,6 +313,17 @@ _AGGREGATE_COLUMNS = (
     "MIN(m.date) AS first_date, MAX(m.date) AS last_date"
 )
 
+
+def _whole_label(part_check: str | None) -> str | None:
+    """The whole-text label recorded by a part check, or ``None``."""
+    if not part_check:
+        return None
+    try:
+        return (json.loads(part_check).get("whole") or {}).get("label")
+    except ValueError, AttributeError:
+        return None
+
+
 #: The per-message columns, named so the streaming pass reads them by name.
 _MESSAGE_SELECT = (
     "SELECT m.message_id AS message_id, m.date AS date, "
@@ -308,7 +334,8 @@ _MESSAGE_SELECT = (
     "e.char_count AS extraction_chars, e.extraction_version AS extraction_version, "
     "sc.id AS score_id, sc.label AS label, sc.fraction_ai AS fraction_ai, "
     "sc.fraction_ai_assisted AS fraction_ai_assisted, sc.fraction_human AS fraction_human, "
-    "sc.detector_version AS detector_version, sc.scored_at AS scored_at"
+    "sc.detector_version AS detector_version, sc.scored_at AS scored_at, "
+    "sc.part_check_status AS part_check_status, sc.part_check AS part_check"
 )
 
 
@@ -724,6 +751,8 @@ def export_stats(
                             "fraction_human": row["fraction_human"],
                             "detector_version": row["detector_version"],
                             "scored_at": row["scored_at"],
+                            "part_check": row["part_check_status"],
+                            "whole_label": _whole_label(row["part_check"]),
                         }
                     )
 

@@ -200,6 +200,7 @@ def test_a_whitespace_only_change_keeps_the_score(store, monkeypatch):
 
     class Result:
         status = "ok"
+        part_starts = ()
 
         def __init__(self, text, method):
             self.text = text

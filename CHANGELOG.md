@@ -37,7 +37,62 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
-## [1.15.4] - unreleased
+## [1.22.1] - 2026-11-16
+Summary: Locate per-window markers on indented lines of the message detail.
+- Window start and end markers are placed on indented extracted lines, which scoring analyses without their indent; such windows were previously reported without a position.
+
+## [1.22.0] - 2026-11-16
+
+Summary: Adopt extraction generation 9 from email-reply-extractor 1.5.0; store the current method label when a re-derivation leaves an extraction's text unchanged.
+
+- Pin `email-reply-extractor` 1.5.0, whose `EXTRACTION_VERSION` is 9: the parent-diff assist keeps a matched run of lines that the message also carries inside its own marked quotation, when the run's block of consecutive non-blank lines is mostly unmatched text.
+- Stored extractions of generation 8 are reported as out of date until re-derived; a reply that repeats lines of its thread parent above a marked quotation regains those lines.
+- `staleness.reextract` and `staleness.diff` write the re-derived `method` to an extraction whose text is unchanged; previously the row was stamped with the running generation while keeping the label written by an earlier routine.
+- New `Store.set_method` updates an extraction's method label and reports whether it changed.
+
+## [1.21.1] - 2026-11-15
+
+Summary: Bring the in-app documentation and the CLI help up to date with the parent-arrival check, substance-gated rescoring, import generation adoption and the part check.
+
+- `docs/pangram-output.md` documents the part check: the `part_check_status` and `part_check` columns, which stored values a replacing verdict changes, and the API's `prediction_short` and `headline` for a replaced verdict.
+- README: the stale-data "Run process ($)" description states that a score is deleted only when the scored text changed in substance and is kept on a whitespace-only change.
+- README: the part check paragraph states that an extraction derived before v1.21.0 is checked once it is re-derived.
+- README: the import description covers adopting a file's higher extraction generation when the derived data already matches.
+- `mail-ai-extract --help` states that already-extracted replies whose parent has since been stored are re-derived first.
+- `mail-ai-score --help` describes the parent-arrival check and the part check, and states that part-check texts count towards `--limit` and are sent as a second job under `--bulk`.
+
+## [1.21.0] - 2026-11-15
+
+Summary: Adopt email-reply-extractor 1.4.0 (extraction generation 8, with part boundaries) and check AI verdicts on text written in several parts by scoring each part.
+
+- Pin `email-reply-extractor` 1.4.0: extraction generation 8 (Apple Mail Share-sheet text read from the HTML part) and the part boundaries of an inline reply (`ExtractionResult.part_starts`, `CleanResult.parts`).
+- Migration 019 adds `extractions.part_starts` (JSON line indices; NULL for rows derived before boundaries were recorded) and `scores.part_check_status` (`single` / `checked`) and `scores.part_check` (JSON detail of the check).
+- Extraction, re-derivation (`staleness.reextract`) and the staleness diff record each extraction's part boundaries, including for text that did not change.
+- Part check: after each scoring run, every verdict with `fraction_ai` at or above 0.8 whose cleaned text has two or more parts has each part scored separately; parts under 50 words are merged into the next part.
+- The parts' verdicts are combined by word count and labelled by Pangram's bands (AI at `fraction_ai` >= 0.8, Human at `fraction_human` > 0.9, otherwise Mixed); when that label differs from the whole-text label it replaces the stored verdict.
+- The whole-text verdict, each part's verdict and whether the parts' verdict replaced it are kept in `scores.part_check`; `raw_response` remains the whole-text Pangram response.
+- A verdict with a single part is recorded as `single` without an API call; a cross-posted text is checked once and the check is copied to every message carrying it, including through the score cache.
+- The part check shares the run's `--limit` on texts sent, runs as a second Bulk API job under `--bulk`, and is reported in the run summary (`part_checked`, `part_replaced`, `part_single`, `part_cache_hits`, `part_failed`).
+- Message API: `score.part_check` reports a checked verdict's whole-text verdict, parts and combined verdict; `prediction_short` and `headline` follow the replacing verdict.
+- Dashboard: the message drawer's analysis card shows a "Checked by parts" section with each part's word count, AI fraction and label.
+- Export/import carries `part_starts` and the part check (absent fields in older files import as NULL); the stats export adds the `part_check` and `whole_label` columns.
+
+## [1.20.0] - 2026-11-14
+
+Summary: Import adopts a higher extraction generation from a file whose derived data matches the target, even when the message's pipeline_version is not later.
+
+- Import: an existing message whose extraction and score equal the file's, under an equal or earlier `pipeline_version`, has its `extractions.extraction_version` raised to the file's generation (a maximum; no other column changes); counted as the new `generations_advanced` summary field.
+- Fixes a copy of a store that had been re-checked by the staleness check (which re-stamps unchanged extractions without moving `messages.pipeline_version`) reading as stale on the target.
+
+## [1.19.0] - 2026-11-14
+
+Summary: Extraction generation 7 via email-reply-extractor v1.3.0, whose parent-diff runs in time linear in its input and aligns on the longest common run of lines.
+
+- Upgrade email-reply-extractor from v1.2.0 to v1.3.0 (extraction generation 7: the parent-diff aligned-run rule matches around the longest common run of lines instead of using `difflib.SequenceMatcher`, and the collapsed "On … wrote:" header is inserted literally); stored extractions now read as stale and the dashboard offers re-derivation.
+- Over the 179,566 messages stored on 2026-11-14, generation 7 changes the extraction of 34 and the cleaned text of 13.
+- The upgrade includes the library's v1.2.3 fixes, which bound processing time on adversarial bodies without changing output.
+
+## [1.18.0] - 2026-11-13
 
 Summary: Container images for development and deployment, from one Dockerfile with a dev target and a Kubernetes-ready production target.
 

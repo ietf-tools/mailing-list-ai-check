@@ -64,8 +64,8 @@ def test_migrations_are_idempotent(tmp_path):
             "v"
         ]
         row_count_after = s.conn.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()["c"]
-    assert version_before == version_after == 18
-    assert row_count_before == row_count_after == 18
+    assert version_before == version_after == 19
+    assert row_count_before == row_count_after == 19
 
 
 def test_reopening_database_is_a_noop(tmp_path):
@@ -77,7 +77,7 @@ def test_reopening_database_is_a_noop(tmp_path):
         rows = s.conn.execute("SELECT COUNT(*) AS c FROM lists").fetchone()["c"]
         version = s.conn.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()["c"]
     assert rows == 1
-    assert version == 18
+    assert version == 19
 
 
 def test_migration_013_undoes_the_003_rebadge(store):
@@ -136,6 +136,9 @@ def test_migration_013_undoes_the_003_rebadge(store):
     store.conn.execute("ALTER TABLE messages DROP COLUMN auto_generated")
     store.conn.execute("ALTER TABLE messages DROP COLUMN from_name")
     store.conn.execute("ALTER TABLE messages DROP COLUMN raw_headers")
+    store.conn.execute("ALTER TABLE extractions DROP COLUMN part_starts")
+    store.conn.execute("ALTER TABLE scores DROP COLUMN part_check_status")
+    store.conn.execute("ALTER TABLE scores DROP COLUMN part_check")
     apply_migrations(store.conn)
     labels = [
         row["label"]
@@ -174,12 +177,15 @@ def test_migration_004_present_on_migrated_db(tmp_path):
         s.conn.execute("ALTER TABLE messages DROP COLUMN auto_generated")
         s.conn.execute("ALTER TABLE messages DROP COLUMN from_name")
         s.conn.execute("ALTER TABLE messages DROP COLUMN raw_headers")
+        s.conn.execute("ALTER TABLE extractions DROP COLUMN part_starts")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check_status")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check")
         s.conn.commit()
     with Store(db) as s:
         cols = {row["name"] for row in s.conn.execute("PRAGMA table_info(messages)").fetchall()}
         version = s.conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
     assert "raw_html" in cols
-    assert version == 18
+    assert version == 19
 
 
 def test_migration_005_adds_last_message_at_column(store):
@@ -210,12 +216,15 @@ def test_migration_005_present_on_migrated_db(tmp_path):
         s.conn.execute("ALTER TABLE messages DROP COLUMN auto_generated")
         s.conn.execute("ALTER TABLE messages DROP COLUMN from_name")
         s.conn.execute("ALTER TABLE messages DROP COLUMN raw_headers")
+        s.conn.execute("ALTER TABLE extractions DROP COLUMN part_starts")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check_status")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check")
         s.conn.commit()
     with Store(db) as s:
         cols = {row["name"] for row in s.conn.execute("PRAGMA table_info(lists)").fetchall()}
         version = s.conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
     assert "last_message_at" in cols
-    assert version == 18
+    assert version == 19
 
 
 def test_migration_006_present_on_migrated_db(tmp_path):
@@ -240,6 +249,9 @@ def test_migration_006_present_on_migrated_db(tmp_path):
         s.conn.execute("ALTER TABLE messages DROP COLUMN auto_generated")
         s.conn.execute("ALTER TABLE messages DROP COLUMN from_name")
         s.conn.execute("ALTER TABLE messages DROP COLUMN raw_headers")
+        s.conn.execute("ALTER TABLE extractions DROP COLUMN part_starts")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check_status")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check")
         s.conn.commit()
     with Store(db) as s:
         indexes = {
@@ -248,7 +260,7 @@ def test_migration_006_present_on_migrated_db(tmp_path):
         }
         version = s.conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
     assert "idx_messages_message_id" in indexes
-    assert version == 18
+    assert version == 19
 
 
 def test_expected_indexes_exist(store):
@@ -1101,12 +1113,15 @@ def test_migration_007_present_on_migrated_db(tmp_path):
         s.conn.execute("ALTER TABLE messages DROP COLUMN auto_generated")
         s.conn.execute("ALTER TABLE messages DROP COLUMN from_name")
         s.conn.execute("ALTER TABLE messages DROP COLUMN raw_headers")
+        s.conn.execute("ALTER TABLE extractions DROP COLUMN part_starts")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check_status")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check")
         s.conn.commit()
     with Store(db) as s:
         cols = {row["name"] for row in s.conn.execute("PRAGMA table_info(messages)").fetchall()}
         version = s.conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
     assert "pipeline_version" in cols
-    assert version == 18
+    assert version == 19
 
 
 def test_message_pipeline_version_roundtrips(store):
@@ -1261,6 +1276,9 @@ def _rewound_to_pre_011(db):
         s.conn.execute("ALTER TABLE messages DROP COLUMN auto_generated")
         s.conn.execute("ALTER TABLE messages DROP COLUMN from_name")
         s.conn.execute("ALTER TABLE messages DROP COLUMN raw_headers")
+        s.conn.execute("ALTER TABLE extractions DROP COLUMN part_starts")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check_status")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check")
         s.conn.commit()
 
 

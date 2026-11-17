@@ -96,6 +96,8 @@ One row per message in scope, scored or not.
 | `fraction_human` | as above |
 | `detector_version` | empty when unscored |
 | `scored_at` | UTC ISO-8601, empty when unscored |
+| `part_check` | `checked` when the verdict's text was scored part by part, `single` when the part check found one part; empty when not looked at |
+| `whole_label` | for a `checked` verdict, the label of the text scored as one text (`label` holds the parts' verdict when the two differ); empty otherwise |
 
 A reply is a row with a non-empty `in_reply_to`. The join from `in_reply_to`
 to `message_id` resolves most threads directly; the archive README notes that

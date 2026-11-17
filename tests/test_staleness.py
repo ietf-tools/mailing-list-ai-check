@@ -127,6 +127,9 @@ def test_migration_backfills_extraction_version_from_message(tmp_path):
         s.conn.execute("ALTER TABLE messages DROP COLUMN auto_generated")
         s.conn.execute("ALTER TABLE messages DROP COLUMN from_name")
         s.conn.execute("ALTER TABLE messages DROP COLUMN raw_headers")
+        s.conn.execute("ALTER TABLE extractions DROP COLUMN part_starts")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check_status")
+        s.conn.execute("ALTER TABLE scores DROP COLUMN part_check")
         s.conn.commit()
     with Store(db) as s:
         after = s.extraction_for_message(message.id)
@@ -500,6 +503,43 @@ def test_reextract_only_stamps_an_unchanged_extraction(store):
     assert (summary.processed, summary.rewritten, summary.unchanged) == (1, 0, 1)
     after = store.extraction_for_message(message.id)
     assert (after.extraction_version, after.pipeline_version) == (EXTRACTION_VERSION, __version__)
+
+
+def test_reextract_updates_the_method_of_an_unchanged_extraction(store):
+    # The same text reached by a different path: only the label is rewritten.
+    message = extracted(store)
+    extraction = store.extraction_for_message(message.id)
+    current_method = extraction.method
+    store.replace_extraction(
+        extraction.id,
+        extracted_text=extraction.extracted_text,
+        method="older-path",
+        status=extraction.status,
+    )
+    score(store, extraction.id, extraction.extracted_text)
+
+    summary = reextract(store, [message.id])
+    assert (summary.processed, summary.rewritten, summary.unchanged) == (1, 0, 1)
+    after = store.extraction_for_message(message.id)
+    assert after.method == current_method
+    assert after.extracted_text == extraction.extracted_text
+    assert store.score_for_extraction(extraction.id) is not None
+
+
+def test_diff_updates_the_method_of_an_unchanged_extraction(store):
+    message = extracted(store)
+    extraction = store.extraction_for_message(message.id)
+    current_method = extraction.method
+    store.replace_extraction(
+        extraction.id,
+        extracted_text=extraction.extracted_text,
+        method="older-path",
+        status=extraction.status,
+    )
+
+    report = diff(store)
+    assert report.differing == []
+    assert store.extraction_for_message(message.id).method == current_method
 
 
 def test_reextract_reports_a_no_longer_ok_extraction(store):
