@@ -1,6 +1,20 @@
 name: Build
 run-name: Build ${{ github.run_number }} of branch ${{ github.ref_name }} by @${{ github.actor }}
 
+# Builds the `prod` image target, publishes it to the GitHub Container Registry
+# and creates a GitHub release, all under the version in __version__.
+#
+# The version is read, never computed. mailing_list_ai_check.__version__ is the
+# single source of truth: pyproject.toml reads it, /api/docs reports it, and the
+# pipeline stamps it into the rows it writes (messages.pipeline_version,
+# extractions.pipeline_version). Its bump policy follows the stored data (see
+# CLAUDE.md), so it is not derived from commit messages, and the image, the git
+# tag and the release all carry the same number as the code inside them.
+#
+# The job runs only in the ietf-tools repository, which publishes to
+# ghcr.io/ietf-tools/mailing-list-ai-check. In any other copy of the repository
+# the workflow is present but skipped, so nothing is published elsewhere.
+
 on:
   workflow_dispatch:
 
@@ -15,66 +29,88 @@ concurrency:
 jobs:
   build:
     name: Build
+    if: github.repository_owner == 'ietf-tools'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Registry paths must be lower case; owner names need not be.
+      IMAGE: ghcr.io/${{ github.repository_owner }}/mailing-list-ai-check
     steps:
       - uses: actions/checkout@v7
-
-      - name: Get Next Version
-        id: semver
-        uses: ietf-tools/semver-action@v1
         with:
-          token: ${{ github.token }}
-          branch: main
-          skipInvalidTags: true
-          patchList: fix, bugfix, perf, refactor, test, tests, chore
+          # Full history and tags, for the existing-tag check below.
+          fetch-depth: 0
 
-      # __version__ is the single source of truth for the version: pyproject.toml
-      # reads it dynamically, /api/docs reports it to the dashboard, and a
-      # pipeline run stamps it into the rows it writes. The image is built from
-      # the runner's checkout, so writing the computed version here is what puts
-      # it inside the image; the edit is not committed back.
-      - name: Set the app version
-        env:
-          VERSION: ${{ steps.semver.outputs.nextStrict }}
+      - name: Read the app version
+        id: version
         run: |
           set -euo pipefail
 
           target="src/mailing_list_ai_check/__init__.py"
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "${target}")"
 
-          # nextStrict is the bare version, without the leading v that `next`
-          # carries. Anything else would end up in the image and in the database.
-          if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
-            echo "::error::semver-action produced an unusable version: '${VERSION}'"
+          if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error file=${target}::__version__ is '${version}', not MAJOR.MINOR.PATCH"
             exit 1
           fi
 
-          previous="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "${target}")"
-          if [ -z "${previous}" ]; then
-            echo "::error file=${target}::no __version__ assignment found to rewrite"
+          # A release is immutable: a version that already has a tag was built
+          # before, and building it again would publish different code under the
+          # same number. Bump __version__ (with a CHANGELOG.md section) instead.
+          git fetch --tags --force --quiet origin
+          if git rev-parse -q --verify "refs/tags/${version}" >/dev/null; then
+            echo "::error file=${target}::tag ${version} already exists; bump __version__ before building"
             exit 1
           fi
 
-          sed -i "s/^__version__ = \".*\"/__version__ = \"${VERSION}\"/" "${target}"
+          image="$(printf '%s' "${IMAGE}" | tr '[:upper:]' '[:lower:]')"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "Version ${version}, image ${image}:${version}"
 
-          # Read it back: a sed that matched nothing exits 0, so the substitution
-          # has to be confirmed rather than assumed.
-          written="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "${target}")"
-          if [ "${written}" != "${VERSION}" ]; then
-            echo "::error file=${target}::__version__ is '${written}', expected '${VERSION}'"
+      - name: Extract the release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # CHANGELOG.md's "Format" section is the specification: a release is
+          # `## [<version>] - <date>`, one `Summary:` line and `- ` bullets, and
+          # lines inside fenced code blocks are skipped. A section dated
+          # `unreleased` has not been committed as a release and is refused.
+          awk -v want="${VERSION}" '
+            /^```/ { fenced = !fenced; next }
+            fenced { next }
+            /^## \[/ {
+              if (found) exit
+              header = "## [" want "] - "
+              if (index($0, header) == 1) {
+                found = 1
+                date = substr($0, length(header) + 1)
+              }
+              next
+            }
+            found && /^Summary: / { print substr($0, 10); print ""; next }
+            found && /^- / { print }
+            END {
+              if (!found) { print "no section for " want > "/dev/stderr"; exit 2 }
+              if (date !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) {
+                print "section for " want " is dated \"" date "\", not YYYY-MM-DD" > "/dev/stderr"; exit 3
+              }
+            }
+          ' CHANGELOG.md > "${RUNNER_TEMP}/release-notes.md" || {
+            echo "::error file=CHANGELOG.md::no dated section for ${VERSION}; every release needs one"
+            exit 1
+          }
+
+          if ! grep -q . "${RUNNER_TEMP}/release-notes.md"; then
+            echo "::error file=CHANGELOG.md::the section for ${VERSION} is empty"
             exit 1
           fi
-          echo "__version__: ${previous} -> ${written}"
+          cat "${RUNNER_TEMP}/release-notes.md"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
-
-      - name: Log in to the registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build the production image
         uses: docker/build-push-action@v7
@@ -83,42 +119,95 @@ jobs:
         with:
           context: .
           target: prod
-          tags: |
-            ghcr.io/ietf-tools/mailing-list-ai-check:${{ steps.semver.outputs.nextStrict }}
           platforms: linux/amd64
-          push: true
+          tags: ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
+          # Loaded into the runner's Docker daemon, so the image that is smoke
+          # tested below is the one that is pushed.
+          load: true
+          push: false
 
-      - name: Create Draft Release
+      # Runs the image with the hardening the k8s Deployment applies: the image's
+      # unprivileged user, a read-only root filesystem, a writable /tmp and the
+      # database on a separate volume.
+      - name: Smoke test the image
+        env:
+          REF: ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          docker volume create mlac-smoke-data >/dev/null
+          # /data in the image is owned by uid 1001; a fresh named volume copies
+          # that ownership from the image on first mount.
+          docker run -d --name mlac-smoke \
+            --read-only --tmpfs /tmp \
+            -v mlac-smoke-data:/data \
+            -e PUBLIC_READONLY=1 -e ALLOW_EXPORT=0 \
+            -p 127.0.0.1:8050:8050 \
+            "${REF}"
+
+          ready=""
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8050/api/capabilities >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "${ready}" ]; then
+            echo "::error::the container did not answer /api/capabilities within 30 seconds"
+            docker logs mlac-smoke
+            exit 1
+          fi
+
+          # The configuration given to the container is the configuration it reports.
+          caps="$(curl -fsS http://127.0.0.1:8050/api/capabilities)"
+          echo "capabilities: ${caps}"
+          echo "${caps}" | jq -e '.public_readonly == true and .allow_export == false' >/dev/null
+
+          # The image reports the version it is published under, and carries the
+          # documentation set.
+          docs="$(curl -fsS http://127.0.0.1:8050/api/docs)"
+          echo "${docs}" | jq -e --arg v "${VERSION}" '.app_version == $v' >/dev/null || {
+            echo "::error::/api/docs reports $(echo "${docs}" | jq -r .app_version), expected ${VERSION}"
+            exit 1
+          }
+          echo "${docs}" | jq -e '[.docs[].path] | index("README.md") and index("CHANGELOG.md")' >/dev/null
+
+          # / serves the built dashboard bundle, not the development notice.
+          curl -fsS http://127.0.0.1:8050/ | grep -q 'src="/assets/'
+
+          # The pipeline commands are on PATH in the same image.
+          for cmd in mail-ai-pull mail-ai-extract mail-ai-score mail-ai-export \
+                     mail-ai-export-stats mail-ai-import; do
+            docker run --rm --entrypoint sh "${REF}" -c "command -v ${cmd}" >/dev/null || {
+              echo "::error::${cmd} is not on PATH in the image"
+              exit 1
+            }
+          done
+
+          docker rm -f mlac-smoke >/dev/null
+          docker volume rm mlac-smoke-data >/dev/null
+          echo "smoke test passed"
+
+      - name: Log in to the registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the tested image
+        env:
+          REF: ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
+        run: docker push "${REF}"
+
+      # Creates the tag at the built commit along with the release, so a second
+      # run at the same version stops at the existing-tag check.
+      - name: Create the release
         uses: ncipollo/release-action@v1.21.0
         with:
-          prerelease: true
-          draft: false
-          owner: ietf-tools
-          repo: mailing-list-ai-check
           commit: ${{ github.sha }}
-          tag: ${{ steps.semver.outputs.nextStrict }}
-          name: ${{ steps.semver.outputs.nextStrict }}
-          body: '*pending*'
-          token: ${{ github.token }}
-
-      - name: Generate CHANGELOG
-        id: changelog
-        uses: Requarks/changelog-action@v1
-        with:
-          token: ${{ github.token }}
-          fromTag: ${{ steps.semver.outputs.nextStrict }}
-          toTag: ${{ steps.semver.outputs.current }}
-          writeToFile: false
-
-      - name: Finalize Release
-        uses: ncipollo/release-action@v1.21.0
-        with:
-          allowUpdates: true
+          tag: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          bodyFile: ${{ runner.temp }}/release-notes.md
           makeLatest: true
-          draft: false
-          owner: ietf-tools
-          repo: mailing-list-ai-check
-          tag: ${{ steps.semver.outputs.nextStrict }}
-          name: ${{ steps.semver.outputs.nextStrict }}
-          body: ${{ steps.changelog.outputs.changes }}
-          token: ${{ github.token }}

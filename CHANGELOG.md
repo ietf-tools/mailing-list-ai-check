@@ -37,6 +37,17 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.22.2] - 2026-11-16
+
+Summary: Add a GitHub Actions workflow that builds, smoke-tests and publishes the production image under the version in `__version__`.
+
+- Add `.github/workflows/build.yml`, a manually started workflow that runs only in the `ietf-tools` repository and is skipped in every other copy.
+- The workflow reads the version from `__version__` and writes nothing back; the image tag, the git tag and the GitHub release all carry that version.
+- The workflow refuses a version that already has a git tag, and a version without a dated `CHANGELOG.md` section.
+- The workflow smoke-tests the image before publishing it (read-only root filesystem, reported capabilities, reported version, documentation set, dashboard bundle, pipeline commands on `PATH`) and pushes that same image to `ghcr.io/ietf-tools/mailing-list-ai-check:<version>`.
+- The GitHub release takes its notes from the version's `CHANGELOG.md` section.
+- `docs/deployment.md` documents the workflow and the release procedure.
+
 ## [1.22.1] - 2026-11-16
 Summary: Locate per-window markers on indented lines of the message detail.
 - Window start and end markers are placed on indented extracted lines, which scoring analyses without their indent; such windows were previously reported without a position.

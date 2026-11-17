@@ -28,23 +28,36 @@ make image-dev    # docker build --target dev  -t mailing-list-ai-check:dev .
 needs network access: it installs the Python dependencies from PyPI and the
 frontend dependencies from the npm registry.
 
-`.github/workflows/build.yml` builds the same `prod` target on every push to
-`main` and every `v*` tag, and publishes it to
-`ghcr.io/<owner>/mailing-list-ai-check` — `ghcr.io/ietf-tools/mailing-list-ai-check`
-for this repository, and a fork's own path for a fork. Three tags are pushed:
-the package version, `latest` (default branch only), and `sha-<commit>`. The
-first two are overwritten by a later build at the same version, so `sha-<commit>`
-is the immutable reference to pin when the deployed commit must be unambiguous.
-A pull request builds and smoke-tests the image but publishes nothing.
+### Published images
 
-The workflow loads the built image into the runner's Docker daemon, runs it with
-the same hardening the Deployment applies (unprivileged user, read-only root
-filesystem, a writable `/tmp`, the database on a separate volume) and checks
-that `/api/capabilities` reports the configuration it was given, that
-`/api/docs` reports the version being built and lists the documentation set,
-that `/` serves the dashboard bundle rather than the "frontend not built"
-notice, and that the pipeline commands are on `PATH`. It then pushes that same
-local image, so what is published is what was tested.
+`.github/workflows/build.yml` builds the same `prod` target and publishes it to
+`ghcr.io/ietf-tools/mailing-list-ai-check:<version>`, with a GitHub release of
+the same name. The workflow is started by hand (`workflow_dispatch`) and runs
+only in the `ietf-tools/mailing-list-ai-check` repository; in any other copy of
+the repository it is skipped and publishes nothing.
+
+The version is read from `mailing_list_ai_check.__version__`, the value the
+code itself reports, and is not derived from commit messages or existing tags.
+The image tag, the git tag (a bare `MAJOR.MINOR.PATCH`, with no `v` prefix) and
+the release name are that version. The workflow stops before building when:
+
+- a git tag for the version already exists, which means the version was
+  published before; a release is never rebuilt under the same number;
+- `CHANGELOG.md` has no section for the version, or that section is dated
+  `unreleased`.
+
+Before publishing, the workflow loads the image into the runner's Docker daemon
+and runs it with the hardening the Deployment applies (unprivileged user,
+read-only root filesystem, a writable `/tmp`, the database on a separate
+volume). It checks that `/api/capabilities` reports the configuration the
+container was given, that `/api/docs` reports the version being published and
+lists `README.md` and `CHANGELOG.md`, that `/` serves the dashboard bundle, and
+that the pipeline commands are on `PATH`. It then pushes that same image. The
+release notes are the version's `CHANGELOG.md` section.
+
+A release is therefore: bump `__version__` and add its dated `CHANGELOG.md`
+section, merge the commit into the `main` branch of `ietf-tools/mailing-list-ai-check`, then
+run the Build workflow there.
 
 Both targets are built from the same context, filtered by `.dockerignore`. That
 file also keeps local data out of the build: an export written with no path
