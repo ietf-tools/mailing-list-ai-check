@@ -37,6 +37,14 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.23.0] - 2026-11-17
+
+Summary: Import applies a file extraction of a higher generation to an existing message even when the message's pipeline_version is not later.
+
+- Import: an existing message whose file `pipeline_version` is equal or earlier, whose file extraction is of a higher generation and whose text differs has its extraction and score replaced with the file's; the message's `pipeline_version` is left unchanged; counted as the new `generations_replaced` summary field and in `extractions_updated` / `scores_updated`.
+- Import: under the same conditions with identical text, the file's generation and method label are adopted and the target's score is kept; previously any difference in method or score left the older generation in place; counted in `generations_advanced`.
+- Import: a file extraction of an equal or lower generation still never changes an existing message whose file `pipeline_version` is not later.
+
 ## [1.22.2] - 2026-11-16
 
 Summary: Add a GitHub Actions workflow that builds, smoke-tests and publishes the production image under the version in `__version__`.

@@ -1584,27 +1584,100 @@ def test_import_earlier_version_identical_data_adopts_the_higher_generation(targ
     assert _messages_by_key(target)[(VF, VMID)]["pipeline_version"] == "2.0.0"
 
 
-def test_import_equal_version_differing_text_keeps_the_target_generation(target, tmp_path):
-    """Differing text under an equal ``pipeline_version`` proves nothing: no stamp moves
-    and the target's derived data is left as it is."""
-    _seed_versioned(target, pipeline_version="1.8.0", extraction_version=4, extracted_text=TEXT_A)
+def test_import_equal_version_differing_text_of_higher_generation_replaces(target, tmp_path):
+    """Differing text from a higher generation under an equal ``pipeline_version``:
+    the target's text came from an older routine, so its extraction and score are
+    replaced with the file's; the message's ``pipeline_version`` is left alone."""
+    _seed_versioned(
+        target,
+        pipeline_version="1.8.0",
+        extraction_version=4,
+        extracted_text=TEXT_A,
+        method="reply_parser",
+        score=V_SCORE_A,
+    )
     out = _versioned_file(
         tmp_path,
         "equaldiff.jsonl",
         pipeline_version="1.8.0",
         extraction_version=6,
         extracted_text=TEXT_B,
+        method="custom",
+        score=V_SCORE_B,
     )
 
     summary = export_import.import_file(target, out)
+    assert summary.generations_replaced == 1
     assert summary.generations_advanced == 0
+    assert summary.extractions_updated == 1
+    assert summary.scores_updated == 1
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 6)
+    ext = _extractions_by_key(target)[(VF, VMID)]
+    assert ext["extracted_text"] == TEXT_B
+    assert ext["method"] == "custom"
+    assert _scores_by_key(target)[(VF, VMID)]["text_sha256"] == V_SCORE_B["text_sha256"]
+    assert _messages_by_key(target)[(VF, VMID)]["pipeline_version"] == "1.8.0"
+
+
+def test_import_earlier_version_differing_text_of_higher_generation_keeps_message_stamp(
+    target, tmp_path
+):
+    """The staging case: the target's message stamp is later than the file's (its
+    own score or part check re-stamped it) but its extraction is older. The
+    file's extraction replaces it and the target's later message stamp stays."""
+    _seed_versioned(target, pipeline_version="1.21.0", extraction_version=5, extracted_text=TEXT_A)
+    out = _versioned_file(
+        tmp_path,
+        "earlierdiff.jsonl",
+        pipeline_version="1.16.0",
+        extraction_version=9,
+        extracted_text=TEXT_B,
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_replaced == 1
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.16.0", 9)
+    assert _extractions_by_key(target)[(VF, VMID)]["extracted_text"] == TEXT_B
+    assert _messages_by_key(target)[(VF, VMID)]["pipeline_version"] == "1.21.0"
+
+
+def test_import_equal_version_differing_text_of_equal_generation_is_skipped(target, tmp_path):
+    """Differing text at the same generation proves nothing: the target is left alone."""
+    _seed_versioned(target, pipeline_version="1.8.0", extraction_version=6, extracted_text=TEXT_A)
+    out = _versioned_file(
+        tmp_path,
+        "equalgendiff.jsonl",
+        pipeline_version="1.8.0",
+        extraction_version=6,
+        extracted_text=TEXT_B,
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_replaced == 0
     assert summary.extractions_updated == 0
-    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 4)
     assert _extractions_by_key(target)[(VF, VMID)]["extracted_text"] == TEXT_A
 
 
-def test_import_equal_version_differing_score_keeps_the_target_generation(target, tmp_path):
-    """The match covers the score too, as in the version-bump branch."""
+def test_import_equal_version_differing_text_of_lower_generation_is_skipped(target, tmp_path):
+    """A file of a lower generation never replaces the target's text."""
+    _seed_versioned(target, pipeline_version="1.8.0", extraction_version=6, extracted_text=TEXT_A)
+    out = _versioned_file(
+        tmp_path,
+        "equallowdiff.jsonl",
+        pipeline_version="1.8.0",
+        extraction_version=4,
+        extracted_text=TEXT_B,
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_replaced == 0
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 6)
+    assert _extractions_by_key(target)[(VF, VMID)]["extracted_text"] == TEXT_A
+
+
+def test_import_equal_version_differing_score_adopts_generation_and_keeps_score(target, tmp_path):
+    """Same text, different score: the generation moves and the target's score,
+    reached on the same text, is kept."""
     _seed_versioned(
         target,
         pipeline_version="1.8.0",
@@ -1622,8 +1695,55 @@ def test_import_equal_version_differing_score_keeps_the_target_generation(target
     )
 
     summary = export_import.import_file(target, out)
-    assert summary.generations_advanced == 0
+    assert summary.generations_advanced == 1
+    assert summary.generations_replaced == 0
+    assert summary.scores_updated == 0
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 6)
+    assert _scores_by_key(target)[(VF, VMID)]["text_sha256"] == V_SCORE_A["text_sha256"]
+
+
+def test_import_equal_version_differing_method_adopts_generation_and_method(target, tmp_path):
+    """Same text, older method label: the file's generation and label are adopted."""
+    _seed_versioned(
+        target,
+        pipeline_version="1.8.0",
+        extraction_version=4,
+        extracted_text=TEXT_A,
+        method="reply_parser",
+        score=V_SCORE_A,
+    )
+    out = _versioned_file(
+        tmp_path,
+        "equalmethod.jsonl",
+        pipeline_version="1.8.0",
+        extraction_version=6,
+        extracted_text=TEXT_A,
+        method="custom",
+        score=V_SCORE_A,
+    )
+
+    summary = export_import.import_file(target, out)
+    assert summary.generations_advanced == 1
+    assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 6)
+    assert _extractions_by_key(target)[(VF, VMID)]["method"] == "custom"
+    assert _scores_by_key(target)[(VF, VMID)]["text_sha256"] == V_SCORE_A["text_sha256"]
+
+
+def test_import_equal_version_generation_replacement_rolls_back_on_dry_run(target, tmp_path):
+    """A dry run reports the replacement but writes nothing."""
+    _seed_versioned(target, pipeline_version="1.8.0", extraction_version=4, extracted_text=TEXT_A)
+    out = _versioned_file(
+        tmp_path,
+        "equalreplacedry.jsonl",
+        pipeline_version="1.8.0",
+        extraction_version=6,
+        extracted_text=TEXT_B,
+    )
+
+    summary = export_import.import_file(target, out, dry_run=True)
+    assert summary.generations_replaced == 1
     assert _extraction_versions_by_key(target)[(VF, VMID)] == ("1.8.0", 4)
+    assert _extractions_by_key(target)[(VF, VMID)]["extracted_text"] == TEXT_A
 
 
 def test_import_equal_version_never_regresses_the_generation(target, tmp_path):
