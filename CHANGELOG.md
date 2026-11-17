@@ -37,6 +37,14 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.25.0] - 2026-11-17
+
+Summary: Adopt extraction generation 10 from email-reply-extractor 1.6.0 without the optional stage-2 evidence arguments.
+
+- Pin `email-reply-extractor` 1.6.0, whose `EXTRACTION_VERSION` is 10: the vendored fragment scanner, quote-header pre-truncation and over-strip guard are removed, and stage 1 gains rules for attribution lines, dividers, re-wrapped quote remainders and unmarked text the author placed.
+- Stage 2 removes more opening greetings and closing sign-offs through the library's rules that need no evidence; the app does not pass `author_name`, `addressee_names` or `signature_lines`.
+- Stored extractions of generation 9 are reported as out of date until re-derived; extraction method labels lose the `erp` component (`custom`, `custom+parent-diff`, `html-custom`).
+
 ## [1.24.0] - 2026-11-17
 
 Summary: Re-derivation compares a scored message's new cleaned text with the text that was scored, so a change made only by the cleaning step invalidates the verdict.

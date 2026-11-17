@@ -16,7 +16,7 @@ import pytest
 from mailing_list_ai_check import cli, staleness
 from mailing_list_ai_check.export_import import export_lists, import_file
 from mailing_list_ai_check.pangram import PangramBulkOutcome, PangramError, PangramResult
-from email_reply_extractor import clean_for_scoring
+from email_reply_extractor import clean_for_scoring, extract_new_text
 from mailing_list_ai_check.store import Store, sha256_text
 
 #: Distinct words, so each generated part is its own text.
@@ -343,9 +343,11 @@ def _quoted_reply(store):
         raw_body=body,
         uid=None,
     ).message
+    # The text the running routine derives, so the row is unchanged on
+    # re-derivation whatever the generation's blank-line layout.
     extraction = store.insert_extraction(
         message_id=message.id,
-        extracted_text=f"{a}\n\n{b}",
+        extracted_text=extract_new_text(body, None).text,
         method="erp",
         status="ok",
         extraction_version=7,
@@ -360,7 +362,10 @@ def test_re_derivation_records_boundaries_of_unchanged_text(store):
     summary = staleness.reextract(store, [message.id])
 
     assert summary.unchanged == 1
-    assert store.get_extraction(extraction.id).part_starts == (2,)
+    assert store.get_extraction(extraction.id).part_starts == (
+        extract_new_text(message.raw_body, None).part_starts
+    )
+    assert len(store.get_extraction(extraction.id).part_starts) == 1
 
 
 def test_new_boundaries_return_a_single_part_finding_to_the_queue(store):
