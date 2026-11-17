@@ -83,7 +83,7 @@ them, and what depends on them.
 ## Versioning
 
 The app uses [semantic versioning](https://semver.org/); the current version is
-**1.23.0**. The single source of truth is `mailing_list_ai_check.__version__`
+**1.24.0**. The single source of truth is `mailing_list_ai_check.__version__`
 (in `__init__.py`); `pyproject.toml` reads it dynamically, so the two never
 drift.
 
@@ -141,7 +141,11 @@ repo:
 - Re-derivation deletes a score only when the cleaned text changed **in
   substance** (`email_reply_extractor.texts_equivalent`); a whitespace-only
   movement keeps the verdict, re-keyed to the new text's hash (see
-  `staleness.reextract`).
+  `staleness.reextract`). The old side of that comparison is the text that was
+  scored, identified by `scores.text_sha256` — not the stored extraction
+  re-cleaned by the running library, which would hide a change made only by
+  `clean_for_scoring`. When neither the new cleaned text nor the re-cleaned
+  stored extraction matches the hash, the change counts as substantive.
 
 Version stamps in the database:
 

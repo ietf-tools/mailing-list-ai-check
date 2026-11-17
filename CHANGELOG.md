@@ -37,6 +37,15 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.24.0] - 2026-11-17
+
+Summary: Re-derivation compares a scored message's new cleaned text with the text that was scored, so a change made only by the cleaning step invalidates the verdict.
+
+- Re-derivation (`staleness.diff`, `staleness.reextract`, parent-arrival refresh) compares the new cleaned text with the score's `text_sha256` instead of with the stored extraction cleaned by the running library, which hid changes made only by `clean_for_scoring`.
+- A scored message whose extracted text is unchanged but whose verdict hash no longer matches the cleaned text is reported by `diff` and has its score deleted by `reextract`; it is counted in `unchanged` and `scores_invalidated`.
+- When the verdict hash matches neither the new cleaned text nor the stored extraction cleaned by the running library, the change counts as substantive, since the scored text cannot be reconstructed for the whitespace comparison.
+- Measured against generation 10 (email-reply-extractor 1.6.0) over 96,871 stored verdicts, the previous comparison invalidated 7,740 and the new one 20,372, with no whitespace-only change counted as substantive; under generation 9 every stored verdict hash matches, so no verdict changes.
+
 ## [1.23.0] - 2026-11-17
 
 Summary: Import applies a file extraction of a higher generation to an existing message even when the message's pipeline_version is not later.

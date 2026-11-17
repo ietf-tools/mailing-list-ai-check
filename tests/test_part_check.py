@@ -16,7 +16,8 @@ import pytest
 from mailing_list_ai_check import cli, staleness
 from mailing_list_ai_check.export_import import export_lists, import_file
 from mailing_list_ai_check.pangram import PangramBulkOutcome, PangramError, PangramResult
-from mailing_list_ai_check.store import Store
+from email_reply_extractor import clean_for_scoring
+from mailing_list_ai_check.store import Store, sha256_text
 
 #: Distinct words, so each generated part is its own text.
 _counter = iter(range(1_000_000))
@@ -364,7 +365,10 @@ def test_re_derivation_records_boundaries_of_unchanged_text(store):
 
 def test_new_boundaries_return_a_single_part_finding_to_the_queue(store):
     message, extraction = _quoted_reply(store)
-    store.insert_score(extraction_id=extraction.id, text_sha256="x", fraction_ai=0.95, label="AI")
+    scored = clean_for_scoring(extraction.extracted_text).text
+    store.insert_score(
+        extraction_id=extraction.id, text_sha256=sha256_text(scored), fraction_ai=0.95, label="AI"
+    )
     score = store.score_for_extraction(extraction.id)
     store.record_part_check(score.id, "single")
 

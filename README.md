@@ -398,7 +398,12 @@ affected messages:
   message keeps its stored score unless the *scored* text changed in substance,
   since only then was the verdict reached on text that no longer exists; when
   the scored text moved only in whitespace the score is kept and re-keyed to the
-  new text. Each message that does need a new verdict is one paid Pangram call
+  new text. The comparison is with the text that was scored, identified by the
+  score's stored hash, so a change made only by the cleaning step counts even
+  when the extracted text is identical; when that hash matches neither the new
+  cleaned text nor the stored extraction cleaned by the running routine, the
+  scored text cannot be reconstructed and the change counts as substantive.
+  Each message that does need a new verdict is one paid Pangram call
   unless its new text is already in the score cache. Both stages report their
   counts as they run.
 - **Not now** leaves everything untouched. An alert icon then sits beside the ⓘ

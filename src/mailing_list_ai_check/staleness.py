@@ -25,7 +25,10 @@ Two texts are compared per message, because either can move independently:
 
 - the extracted text, which is what the dashboard displays; and
 - the cleaned text (:func:`~email_reply_extractor.cleaning.clean_for_scoring`),
-  which is what a score is a verdict on.
+  which is what a score is a verdict on. For a scored message it is compared
+  with the text that was scored, identified by ``scores.text_sha256``, so a
+  change made by the cleaning step alone is seen even when the extracted text
+  is identical.
 
 A cleaned text changed *in substance* is what invalidates a score: the
 comparison is :func:`email_reply_extractor.texts_equivalent`, so a cleaned text
@@ -181,6 +184,9 @@ class _Rederived:
     scored_text: str
     stored_scored_text: str
     part_starts: tuple[int, ...]
+    #: ``scores.text_sha256`` of the message's verdict — the hash of the text
+    #: that was actually sent — or ``None`` when the message has no score.
+    score_sha256: str | None = None
 
     @property
     def text_changed(self) -> bool:
@@ -188,14 +194,37 @@ class _Rederived:
 
     @property
     def scored_text_changed(self) -> bool:
+        """True when the text that would be sent differs from the one compared with.
+
+        For a scored message the comparison is with the text that was scored,
+        known by its hash. Cleaning the stored extraction with the running
+        routine is not enough: a change made only by the cleaning step
+        (stage 2) would appear on both sides and cancel out, leaving a verdict
+        on text the app no longer sends. An unscored message is compared with
+        its stored extraction cleaned by the running routine.
+        """
+        if self.score_sha256 is not None:
+            return sha256_text(self.scored_text) != self.score_sha256
         return self.scored_text != self.stored_scored_text
 
     @property
     def scored_text_changed_in_substance(self) -> bool:
-        """True when the cleaned text moved beyond whitespace — the rescore test."""
-        return self.scored_text_changed and not texts_equivalent(
-            self.scored_text, self.stored_scored_text
-        )
+        """True when the cleaned text moved beyond whitespace — the rescore test.
+
+        The substance comparison needs the scored text itself, which is not
+        stored. When the stored extraction, cleaned by the running routine,
+        hashes to the score's hash, it is that text and
+        :func:`email_reply_extractor.texts_equivalent` decides. Otherwise the
+        cleaning step has changed since the verdict was reached, the scored
+        text cannot be reconstructed, and the change counts as substantive.
+        """
+        if not self.scored_text_changed:
+            return False
+        if self.score_sha256 is not None and sha256_text(self.stored_scored_text) != (
+            self.score_sha256
+        ):
+            return True
+        return not texts_equivalent(self.scored_text, self.stored_scored_text)
 
     @property
     def changed(self) -> bool:
@@ -228,6 +257,7 @@ def _rederive(store: Store, message: Message, extraction: Extraction) -> _Rederi
     )
     result = extract_new_text(message.raw_body, parent_body, html_body=message.raw_html)
     hint = _signature_hint(message)
+    existing_score = store.score_for_extraction(extraction.id)
     return _Rederived(
         extraction=extraction,
         text=result.text,
@@ -236,6 +266,7 @@ def _rederive(store: Store, message: Message, extraction: Extraction) -> _Rederi
         scored_text=clean_for_scoring(result.text, hint).text,
         stored_scored_text=clean_for_scoring(extraction.extracted_text, hint).text,
         part_starts=result.part_starts,
+        score_sha256=existing_score.text_sha256 if existing_score is not None else None,
     )
 
 
@@ -327,7 +358,7 @@ def diff(store: Store) -> DiffReport:
                 text_changed=rederived.text_changed,
                 scored_text_changed=rederived.scored_text_changed,
                 scored_text_changed_in_substance=rederived.scored_text_changed_in_substance,
-                scored=store.score_for_extraction(extraction.id) is not None,
+                scored=rederived.score_sha256 is not None,
             )
         )
 
@@ -355,6 +386,14 @@ def reextract(store: Store, message_ids: Sequence[int]) -> ReextractSummary:
       reached on text that no longer exists. A cleaned text that moved only in
       whitespace keeps its verdict, re-keyed to the new text's hash
       (:meth:`~mailing_list_ai_check.store.Store.rekey_score_for_extraction`).
+    - if the extracted text is unchanged but a verdict's ``text_sha256`` no
+      longer matches the cleaned text (the cleaning step changed), leave the
+      extraction as in the first case (counted in ``unchanged``) and settle the
+      score as in the second.
+
+    A verdict is compared with the text that was scored, by its hash, not with
+    the stored extraction re-cleaned by the running routine (see
+    :attr:`_Rederived.scored_text_changed`).
 
     Messages without an extraction row are skipped. Nothing is re-scored here:
     ``rescore_message_ids`` lists the messages whose extraction is now ``ok`` and
@@ -381,16 +420,26 @@ def reextract(store: Store, message_ids: Sequence[int]) -> ReextractSummary:
             store.set_method(extraction.id, rederived.method)
             continue
 
-        store.replace_extraction(
-            extraction.id,
-            extracted_text=rederived.text,
-            method=rederived.method,
-            status=rederived.status,
-            part_starts=rederived.part_starts,
-        )
-        summary.rewritten += 1
-        if rederived.status != "ok":
-            summary.not_ok += 1
+        if rederived.text_changed:
+            store.replace_extraction(
+                extraction.id,
+                extracted_text=rederived.text,
+                method=rederived.method,
+                status=rederived.status,
+                part_starts=rederived.part_starts,
+            )
+            summary.rewritten += 1
+            if rederived.status != "ok":
+                summary.not_ok += 1
+        else:
+            # The extraction stands; only the verdict is on text the cleaning
+            # step no longer produces. Treated as the unchanged path, then the
+            # score is settled below.
+            summary.unchanged += 1
+            if extraction.extraction_version != EXTRACTION_VERSION:
+                store.set_extraction_version(extraction.id)
+            store.set_part_starts(extraction.id, rederived.part_starts)
+            store.set_method(extraction.id, rederived.method)
 
         if rederived.scored_text_changed:
             if rederived.scored_text_changed_in_substance:
