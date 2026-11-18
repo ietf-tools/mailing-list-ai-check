@@ -83,7 +83,7 @@ them, and what depends on them.
 ## Versioning
 
 The app uses [semantic versioning](https://semver.org/); the current version is
-**1.22.2**. The single source of truth is `mailing_list_ai_check.__version__`
+**1.25.0**. The single source of truth is `mailing_list_ai_check.__version__`
 (in `__init__.py`); `pyproject.toml` reads it dynamically, so the two never
 drift.
 
@@ -121,7 +121,7 @@ repo:
   bump when the new library release changed extraction output (its
   `EXTRACTION_VERSION` moved — stored data is affected on re-extraction), and a
   **patch** bump otherwise.
-- Nine generations exist: **1** (initial release), **2** (from v1.2.0), **3**
+- Ten generations exist: **1** (initial release), **2** (from v1.2.0), **3**
   (from v1.11.0) and **4** (from v1.15.0) were produced in this codebase before
   the library was extracted; **5** shipped in the library's v1.1.0 (fragment
   edges kept, Outlook-boundary fix uncapped), first pinned by app v1.16.0;
@@ -137,11 +137,21 @@ repo:
   shipped in the library's v1.5.0 (the parent-diff assist keeps a line the
   author repeats from the thread parent when the message also carries it
   inside its own marked quotation and its block is mostly unmatched text),
-  first pinned by app v1.22.0.
+  first pinned by app v1.22.0; **10** shipped in the library's v1.6.0 (the
+  vendored fragment scanner removed, new stage-1 attribution, divider,
+  wrap-remainder and marking-mode rules, generic stage-2 greeting and sign-off
+  rules), first pinned by app v1.25.0. The app does not pass the optional
+  stage-2 evidence arguments (`author_name`, `addressee_names`,
+  `signature_lines`): learned signature lines depend on a sender's other
+  messages and would change stored cleaned text as mail arrives.
 - Re-derivation deletes a score only when the cleaned text changed **in
   substance** (`email_reply_extractor.texts_equivalent`); a whitespace-only
   movement keeps the verdict, re-keyed to the new text's hash (see
-  `staleness.reextract`).
+  `staleness.reextract`). The old side of that comparison is the text that was
+  scored, identified by `scores.text_sha256` — not the stored extraction
+  re-cleaned by the running library, which would hide a change made only by
+  `clean_for_scoring`. When neither the new cleaned text nor the re-cleaned
+  stored extraction matches the hash, the change counts as substantive.
 
 Version stamps in the database:
 

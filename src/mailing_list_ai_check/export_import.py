@@ -173,10 +173,14 @@ class ImportSummary:
     moved — the message's ``pipeline_version`` and, when the file's generation is
     higher, the extraction's ``extraction_version`` (no other message column is
     ever modified). ``generations_advanced`` counts skipped messages whose
-    ``pipeline_version`` was *not* later but whose derived state matched a file
-    of a higher extraction generation, so only the extraction's
-    ``extraction_version`` moved. ``dry_run`` is true when the run rolled back
-    instead of committing.
+    ``pipeline_version`` was *not* later but whose file extraction was of a
+    higher generation with the same text, so only the extraction's
+    ``extraction_version`` (and, when it differed, its ``method``) moved.
+    ``generations_replaced`` counts skipped messages whose ``pipeline_version``
+    was not later but whose file extraction was of a higher generation with
+    different text, so the extraction and score were replaced with the file's
+    (also counted in ``extractions_updated`` / ``scores_updated``).
+    ``dry_run`` is true when the run rolled back instead of committing.
     """
 
     lists_created: int = 0
@@ -193,6 +197,7 @@ class ImportSummary:
     scores_updated: int = 0
     versions_bumped: int = 0
     generations_advanced: int = 0
+    generations_replaced: int = 0
     dry_run: bool = False
 
     def as_line(self) -> str:
@@ -206,6 +211,7 @@ class ImportSummary:
             f"extractions_updated={self.extractions_updated} scores_updated={self.scores_updated} "
             f"versions_bumped={self.versions_bumped} "
             f"generations_advanced={self.generations_advanced} "
+            f"generations_replaced={self.generations_replaced} "
             f"dry_run={self.dry_run}"
         )
 
@@ -750,6 +756,7 @@ class _Importer:
         self.scores_updated = 0
         self.versions_bumped = 0
         self.generations_advanced = 0
+        self.generations_replaced = 0
 
     # -- dispatch -------------------------------------------------------------
 
@@ -981,15 +988,15 @@ class _Importer:
                     self._refresh_derived(
                         existing["id"], extraction, raw_body, file_version, lineno
                     )
-            elif extraction is not None and self._derived_matches(existing["id"], extraction):
-                # Same (or earlier) pipeline_version, identical derived data. The
-                # staleness check re-stamps an unchanged extraction's generation
-                # without touching messages.pipeline_version, so a copy of a
-                # re-checked store carries a higher generation under an equal
-                # pipeline_version. Adopt that generation (a maximum) and nothing
-                # else: the message row and the extraction's provenance stay put.
-                if self._advance_generation(existing["id"], extraction, file_version):
-                    self.generations_advanced += 1
+            elif extraction is not None:
+                # Same (or earlier) pipeline_version. The staleness check and a
+                # re-derivation raise an extraction's generation without touching
+                # messages.pipeline_version, so a file can carry a higher
+                # generation under an equal or earlier pipeline_version; the
+                # generation decides (see _reconcile_generation).
+                self._reconcile_generation(
+                    existing["id"], extraction, raw_body, file_version, lineno
+                )
             return
 
         self.messages_inserted += 1
@@ -1196,6 +1203,66 @@ class _Importer:
         )
         return True
 
+    def _reconcile_generation(
+        self,
+        message_pk: int,
+        extraction: dict[str, Any],
+        raw_body: str | None,
+        file_version: str | None,
+        lineno: int,
+    ) -> None:
+        """Apply a file extraction of a higher generation under a not-later version.
+
+        Reached for an existing message whose file ``pipeline_version`` is equal
+        to or earlier than the target's. The message row is never modified.
+
+        - Identical derived data (:meth:`_derived_matches`): the generation is
+          raised to the file's (``generations_advanced``).
+        - Otherwise nothing happens unless the target has an extraction and the
+          file's generation is known and higher than the target's.
+        - Same text (``sha256``, ``status``, ``char_count``) with a differing
+          method label or score: the generation and method are adopted from the
+          file and the target's score is kept, since it was reached on the same
+          text (``generations_advanced``).
+        - Differing text: the target's text was produced by an older routine, so
+          its extraction and score are replaced with the file's, as in the
+          later-version refresh, but the message's ``pipeline_version`` is left
+          as it is (``generations_replaced``, also counted in
+          ``extractions_updated`` / ``scores_updated``).
+        """
+        if self._derived_matches(message_pk, extraction):
+            if self._advance_generation(message_pk, extraction, file_version):
+                self.generations_advanced += 1
+            return
+        generation = _file_generation(extraction, file_version)
+        if generation is None:
+            return
+        target = self.conn.execute(
+            "SELECT id, extracted_text, status, char_count, extraction_version "
+            "FROM extractions WHERE message_id = ?",
+            (message_pk,),
+        ).fetchone()
+        if target is None or (target["extraction_version"] or 0) >= generation:
+            return
+        file_char = extraction.get("char_count")
+        same_text = (
+            sha256_text(target["extracted_text"]) == extraction.get("sha256")
+            and target["status"] == extraction.get("status")
+            and (file_char is None or target["char_count"] == file_char)
+        )
+        if same_text:
+            self._adopt_part_starts(target["id"], extraction)
+            self.conn.execute(
+                "UPDATE extractions SET extraction_version = ?, method = ? WHERE id = ?",
+                (generation, extraction["method"], target["id"]),
+            )
+            self.generations_advanced += 1
+            return
+        self._refresh_derived(
+            message_pk, extraction, raw_body, file_version, lineno, stamp_message=False
+        )
+        self.generations_replaced += 1
+
     def _adopt_part_starts(self, extraction_id: int, extraction: dict[str, Any]) -> None:
         """Copy the file's part boundaries onto a target extraction that has none.
 
@@ -1218,6 +1285,8 @@ class _Importer:
         raw_body: str | None,
         file_version: str | None,
         lineno: int,
+        *,
+        stamp_message: bool = True,
     ) -> None:
         """Replace the target's derived state with the file's (message untouched).
 
@@ -1229,6 +1298,9 @@ class _Importer:
         :meth:`_write_extraction`). Records
         ``extractions_updated`` once, and ``scores_updated`` when the score state
         changed (a score was inserted or an existing one removed).
+        ``stamp_message=False`` leaves the message's ``pipeline_version`` alone,
+        for a replacement decided by extraction generation rather than by a
+        later file ``pipeline_version``.
         """
         target_ext = self.conn.execute(
             "SELECT id FROM extractions WHERE message_id = ?", (message_pk,)
@@ -1251,10 +1323,11 @@ class _Importer:
         if file_has_score or target_had_score:
             self.scores_updated += 1
 
-        self.conn.execute(
-            "UPDATE messages SET pipeline_version = ? WHERE id = ?",
-            (file_version, message_pk),
-        )
+        if stamp_message:
+            self.conn.execute(
+                "UPDATE messages SET pipeline_version = ? WHERE id = ?",
+                (file_version, message_pk),
+            )
 
     def _handle_trailer(self, record: dict[str, Any], lineno: int) -> None:
         expected = {
@@ -1287,6 +1360,7 @@ class _Importer:
             scores_updated=self.scores_updated,
             versions_bumped=self.versions_bumped,
             generations_advanced=self.generations_advanced,
+            generations_replaced=self.generations_replaced,
             dry_run=dry_run,
         )
 

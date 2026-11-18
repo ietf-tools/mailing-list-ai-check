@@ -494,6 +494,42 @@ def test_reextract_carries_the_score_when_the_cleaned_text_moved_only_in_whitesp
     assert kept.text_sha256 == sha256_text(clean_for_scoring(body).text)
 
 
+def test_reextract_invalidates_a_score_whose_text_only_the_cleaning_step_changed(store):
+    # The extraction is what the running routine derives, but the verdict was
+    # reached on a different cleaned text (the cleaning step has changed since).
+    # Re-cleaning the stored extraction with the running routine would match the
+    # fresh text and hide the drift; the comparison is with the scored hash.
+    message = extracted(store)
+    extraction = store.extraction_for_message(message.id)
+    score(store, extraction.id, f"{BODY}\n\nThanks,\nAlice")
+
+    report = diff(store)
+    assert [d.message_id for d in report.differing] == [message.id]
+    row = report.differing[0]
+    assert (row.text_changed, row.scored_text_changed) == (False, True)
+    assert row.scored_text_changed_in_substance and row.scored
+
+    summary = reextract(store, [message.id])
+    assert (summary.processed, summary.rewritten, summary.unchanged) == (1, 0, 1)
+    assert summary.scores_invalidated == 1
+    assert summary.rescore_message_ids == [message.id]
+    after = store.extraction_for_message(message.id)
+    assert after.extracted_text == BODY
+    assert after.extraction_version == EXTRACTION_VERSION
+    assert store.score_for_extraction(extraction.id) is None
+
+
+def test_diff_does_not_report_a_score_on_the_current_cleaned_text(store):
+    message = extracted(store)
+    extraction = store.extraction_for_message(message.id)
+    score(store, extraction.id, clean_for_scoring(BODY).text)
+
+    assert diff(store).differing == []
+    summary = reextract(store, [message.id])
+    assert (summary.unchanged, summary.scores_invalidated) == (1, 0)
+    assert store.score_for_extraction(extraction.id) is not None
+
+
 def test_reextract_only_stamps_an_unchanged_extraction(store):
     message = extracted(store)
     extraction = store.extraction_for_message(message.id)

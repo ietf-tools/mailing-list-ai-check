@@ -37,6 +37,31 @@ code blocks, no release section appears before the first `## [` header.
 
 No 1.1.0 release exists: the version went from 1.0.5 to 1.2.0.
 
+## [1.25.0] - 2026-11-17
+
+Summary: Adopt extraction generation 10 from email-reply-extractor 1.6.0 without the optional stage-2 evidence arguments.
+
+- Pin `email-reply-extractor` 1.6.0, whose `EXTRACTION_VERSION` is 10: the vendored fragment scanner, quote-header pre-truncation and over-strip guard are removed, and stage 1 gains rules for attribution lines, dividers, re-wrapped quote remainders and unmarked text the author placed.
+- Stage 2 removes more opening greetings and closing sign-offs through the library's rules that need no evidence; the app does not pass `author_name`, `addressee_names` or `signature_lines`.
+- Stored extractions of generation 9 are reported as out of date until re-derived; extraction method labels lose the `erp` component (`custom`, `custom+parent-diff`, `html-custom`).
+
+## [1.24.0] - 2026-11-17
+
+Summary: Re-derivation compares a scored message's new cleaned text with the text that was scored, so a change made only by the cleaning step invalidates the verdict.
+
+- Re-derivation (`staleness.diff`, `staleness.reextract`, parent-arrival refresh) compares the new cleaned text with the score's `text_sha256` instead of with the stored extraction cleaned by the running library, which hid changes made only by `clean_for_scoring`.
+- A scored message whose extracted text is unchanged but whose verdict hash no longer matches the cleaned text is reported by `diff` and has its score deleted by `reextract`; it is counted in `unchanged` and `scores_invalidated`.
+- When the verdict hash matches neither the new cleaned text nor the stored extraction cleaned by the running library, the change counts as substantive, since the scored text cannot be reconstructed for the whitespace comparison.
+- Measured against generation 10 (email-reply-extractor 1.6.0) over 96,871 stored verdicts, the previous comparison invalidated 7,740 and the new one 20,372, with no whitespace-only change counted as substantive; under generation 9 every stored verdict hash matches, so no verdict changes.
+
+## [1.23.0] - 2026-11-17
+
+Summary: Import applies a file extraction of a higher generation to an existing message even when the message's pipeline_version is not later.
+
+- Import: an existing message whose file `pipeline_version` is equal or earlier, whose file extraction is of a higher generation and whose text differs has its extraction and score replaced with the file's; the message's `pipeline_version` is left unchanged; counted as the new `generations_replaced` summary field and in `extractions_updated` / `scores_updated`.
+- Import: under the same conditions with identical text, the file's generation and method label are adopted and the target's score is kept; previously any difference in method or score left the older generation in place; counted in `generations_advanced`.
+- Import: a file extraction of an equal or lower generation still never changes an existing message whose file `pipeline_version` is not later.
+
 ## [1.22.2] - 2026-11-16
 
 Summary: Add a GitHub Actions workflow that builds, smoke-tests and publishes the production image under the version in `__version__`.

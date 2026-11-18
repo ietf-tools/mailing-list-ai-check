@@ -125,15 +125,27 @@ applies). But its derived data may now be refreshed:
 
 1. Compare the file message's `pipeline_version` with the target row's
    (tuple comparison, NULL oldest).
-2. If the file's version is **not later**, skip the message and its embedded
-   extraction/score (`messages_skipped`). One stamp may still move: when the
-   derived data is equal (the same comparison as step 3) and the file
-   record's `extraction_version` is higher than the target extraction's, the
-   target's `extraction_version` is raised to it (counted as
-   `generations_advanced`). The staleness check re-stamps an unchanged
-   extraction's generation without moving the message's `pipeline_version`,
-   so a copy of a re-checked store carries a higher generation under an equal
-   `pipeline_version`. No other column changes.
+2. If the file's version is **not later**, the message counts in
+   `messages_skipped` and the extraction generation decides. The staleness
+   check and a re-derivation raise an extraction's generation without moving
+   the message's `pipeline_version`, and a target's own scoring or part check
+   can move its message stamp past the file's, so a file can carry a newer
+   extraction under an equal or earlier `pipeline_version`.
+   - Derived data equal (the same comparison as step 3) and the file record's
+     `extraction_version` higher than the target extraction's: the target's
+     `extraction_version` is raised to it (counted as `generations_advanced`).
+   - Otherwise nothing changes unless the target has an extraction and the
+     file record's generation is known and higher than the target's. In that
+     case:
+     - same text (`sha256`, `status`, `char_count`): the file's generation and
+       `method` are adopted and the target's score, reached on the same text,
+       is kept (counted as `generations_advanced`);
+     - different text: the target's extraction and score are replaced with the
+       file's, as in step 3, but the message's `pipeline_version` is left
+       unchanged (counted as `generations_replaced`, and in
+       `extractions_updated` / `scores_updated`).
+   - A file record of an equal, lower or unknown generation never changes the
+     target.
 3. If the file's version **is later**, compare derived data:
    - extraction equality: `sha256` of the text, `method`, `status`,
      `char_count`;
@@ -158,8 +170,8 @@ applies). But its derived data may now be refreshed:
    `messages_skipped` — its own row was not inserted).
 
 `ImportSummary` gains `extractions_updated: int = 0`,
-`scores_updated: int = 0`, `versions_bumped: int = 0` and
-`generations_advanced: int = 0`.
+`scores_updated: int = 0`, `versions_bumped: int = 0`,
+`generations_advanced: int = 0` and `generations_replaced: int = 0`.
 
 ### Version stamps on an imported extraction
 
@@ -466,6 +478,7 @@ class ImportSummary:
     scores_updated: int = 0
     versions_bumped: int = 0
     generations_advanced: int = 0
+    generations_replaced: int = 0
     dry_run: bool = False
 
     def as_line(self) -> str: ...
